@@ -1,0 +1,40 @@
+{
+  "name": "hs-timecode",
+  "productName": "HS TIMECODE",
+  "version": "0.1.0",
+  "description": "Ứng dụng timecode & ghi OSC từ Resolume Arena (macOS)",
+  "main": "main.js",
+  "author": "HS",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "sim": "node tools/resolume-sim.js",
+    "loopback": "node tools/loopback-test.js",
+    "dist": "electron-builder --mac dir"
+  },
+  "dependencies": {
+    "osc": "^2.4.5"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.hs.timecode",
+    "productName": "HS TIMECODE",
+    "npmRebuild": false,
+    "asar": true,
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dir"
+      ],
+      "category": "public.app-category.music"
+    }
+  }
+}

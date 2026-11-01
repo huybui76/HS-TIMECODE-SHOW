@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <title>HS TIMECODE</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' file:; script-src 'self'">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">HS<span>TIMECODE</span><small>HUY SHOW CONTROL</small></div>
+
+    <nav id="menubar">
+      <div class="menu"><button class="menu-btn">File</button>
+        <div class="menu-drop">
+          <button data-act="open">Mở dự án…<span class="sc">⌘O</span></button>
+          <button data-act="save">Lưu dự án<span class="sc">⌘S</span></button>
+        </div>
+      </div>
+      <div class="menu"><button class="menu-btn">Chỉnh sửa</button>
+        <div class="menu-drop">
+          <button data-act="undo">Hoàn tác<span class="sc">⌘Z</span></button>
+          <button data-act="redo">Làm lại<span class="sc">⇧⌘Z</span></button>
+          <div class="menu-sep"></div>
+          <button data-act="cut">Cắt clip<span class="sc">⌘X</span></button>
+          <button data-act="copy">Sao chép clip<span class="sc">⌘C</span></button>
+          <button data-act="paste">Dán clip tại playhead<span class="sc">⌘V</span></button>
+          <button data-act="hide">Ẩn / hiện clip</button>
+          <button data-act="delete">Xóa clip<span class="sc">Del</span></button>
+        </div>
+      </div>
+      <div class="menu"><button class="menu-btn">Xem</button>
+        <div class="menu-drop">
+          <button data-act="zoomin">Phóng to</button>
+          <button data-act="zoomout">Thu nhỏ</button>
+          <button data-act="home">Về đầu</button>
+          <button data-act="follow">Bật/tắt "Theo thanh đò"</button>
+        </div>
+      </div>
+      <div class="menu"><button class="menu-btn">Trợ giúp</button>
+        <div class="menu-drop">
+          <button data-act="help">Hướng dẫn nhanh</button>
+        </div>
+      </div>
+    </nav>
+
+    <div class="tc-controls">
+      <label>FPS
+        <select id="fpsSel">
+          <option>24</option>
+          <option>25</option>
+          <option selected>30</option>
+          <option>60</option>
+        </select>
+      </label>
+    </div>
+
+    <div id="tcDisplay"><span id="tcText">00:00:00:00</span><span id="recDot" class="dot"></span></div>
+
+    <div class="transport">
+      <button id="btnHome" title="Về đầu (Home)">⏮</button>
+      <button id="btnPlay" title="Phát / Tạm dừng (Space)">▶</button>
+      <button id="btnStop" title="Dừng (S)">■</button>
+      <button id="btnLoop" title="Lặp (L)">⟲</button>
+      <select id="speedSel" title="Tốc độ">
+        <option value="0.5">0.5×</option>
+        <option value="0.75">0.75×</option>
+        <option value="1" selected>1×</option>
+        <option value="1.25">1.25×</option>
+        <option value="1.5">1.5×</option>
+        <option value="2">2×</option>
+      </select>
+      <button id="btnRec" class="rec" title="Bật/tắt ghi (R) — bật REC là tự phát + ghi">● REC</button>
+    </div>
+  </header>
+
+  <main>
+    <aside id="cuePanel">
+      <div class="panel-head">
+        <span>DANH SÁCH CUE</span>
+        <span class="spacer"></span>
+        <button id="btnSaveProj" class="mini" title="Lưu dự án (⌘S)">Lưu</button>
+        <button id="btnOpenProj" class="mini" title="Mở dự án (⌘O)">Mở</button>
+      </div>
+      <div class="toolbar">
+        <button id="btnAddCue" class="primary" title="Thêm cue rỗng tại vị trí thanh đò, vào thư mục đang chọn">＋ Cue</button>
+        <button id="btnAddFolder" title="Thêm thư mục cue (mỗi thư mục có OFFSET riêng)">＋ Thư mục</button>
+        <span class="spacer"></span>
+        <button id="btnDelCue" class="danger" title="Xóa cue đang chọn (Delete)">Xóa</button>
+      </div>
+      <div class="toolbar">
+        <button id="btnCopy" title="Sao chép cue đang chọn">Sao chép</button>
+        <button id="btnCut" title="Cắt cue đang chọn">Cắt</button>
+        <button id="btnPaste" title="Dán cue vào thanh đò">Dán</button>
+        <button id="btnCueUp" title="Lùi cue 1 frame">↑</button>
+        <button id="btnCueDown" title="Tăng cue 1 frame">↓</button>
+      </div>
+      <input id="cueSearch" class="search" placeholder="🔍 Tìm cue — tên hoặc số…">
+      <div id="folderList"></div>
+
+      <div class="panel-head">
+        <span>NHÁC</span>
+        <span class="spacer"></span>
+        <button id="btnSortSongs" class="mini" title="Sắp xếp A→Z">A→Z</button>
+        <button id="btnAddSong" class="mini primary" title="Thêm bài hát">＋ Thêm nhạc</button>
+      </div>
+      <div id="audioDrop" title="Kéo thả file âm thanh từ Finder vào đây">
+        Thả file âm thanh vào đây,<br>hoặc nhấn <b>＋ Thêm nhạc</b>
+      </div>
+      <input id="songSearch" class="search" placeholder="🔍 Tìm nhạc — tên hoặc số…">
+      <div id="songList"></div>
+    </aside>
+
+    <section id="center">
+      <div id="infoStrip">
+        <div class="info-cell">
+          <div class="info-label">HIỆN TẠI</div>
+          <div class="info-tc cur" id="infoCur">00:00:00:00</div>
+        </div>
+        <div class="info-cell">
+          <div class="info-label">CUE TIẾP THEO</div>
+          <div class="info-next">
+            <div class="info-tc next" id="infoNext">--:--:--:--</div>
+            <div id="infoNextName" class="info-name">không còn cue nào</div>
+          </div>
+        </div>
+        <div class="info-cell">
+          <div class="info-label">CÒN LẠI</div>
+          <div class="info-tc rem" id="infoRem">00:00:00:00</div>
+        </div>
+      </div>
+      <div id="tlHeader">
+        <span class="tl-title">TIMELINE — <span id="tlSongName">Chính</span></span>
+        <button id="btnLaneV" title="Thêm lane V (video cue — kéo cue vào)">＋ V</button>
+        <button id="btnLaneA" title="Thêm lane A (audio — kéo bài hát vào đây)">＋ A</button>
+        <button id="btnLaneR" title="Thêm lane R (ghi OSC từ Resolume)">＋ R</button>
+        <span class="selbar" id="selBar">
+          <span id="selCount" class="selcount">0 đã chọn</span>
+          <button id="btnSelCopy" title="Sao chép các cue đang chọn (⌘C)">Sao chép</button>
+          <button id="btnSelCut" title="Cắt (⌘X)">Cắt</button>
+          <button id="btnSelPaste" title="Dán tại thanh đò (⌘V)">Dán</button>
+          <button id="btnSelHide" title="Ẩn/hiện cue đang chọn (không gửi OSC)">⊘ Ẩn</button>
+          <button id="btnSelDel" class="danger" title="Xóa (Del)">Xóa</button>
+          <button id="btnSelNone" title="Bỏ chọn">Bỏ chọn</button>
+        </span>
+        <span class="spacer"></span>
+        <span id="tlStats" class="hint">0 cue · 0 lane</span>
+      </div>
+      <div id="timelineWrap">
+        <canvas id="timeline"></canvas>
+      </div>
+      <div id="midiRecBar">
+        <span class="mr-label">▼ MIDI REC</span>
+        <button id="mrRec" class="rec">● REC TẮT</button>
+        <label class="mr-lane">LANE GHI
+          <select id="mrLane"></select>
+        </label>
+        <button id="mrResolume" title="Kiểm tra Resolume gửi OSC">Resolume</button>
+        <span id="mrRx" class="rx-badge" title="Số OSC nhận được">RX 0</span>
+        <span id="mrLast" class="mr-last" title="OSC mới nhất nhận được">—</span>
+        <button id="mrToCue" title="Tạo cue từ OSC mới nhất, tại thanh đò, vào thư mục đang chọn">OSC → Cue</button>
+        <button id="mrDedupe" title="Xóa cue trùng (cùng địa chỉ + cùng thời điểm, trong thư mục đang chọn)">Dọn trùng</button>
+        <button id="mrMonitor" title="Mở bảng MONITOR xem toàn bộ OSC nhận được">Monitor ⇗</button>
+      </div>
+      <div id="propsPanel">
+        <div id="propsHead">
+          <span>THUỘC TÍNH CUE</span>
+          <span class="spacer"></span>
+          <span id="propsEmptyHint" class="hint">Chọn một cue trên timeline hoặc trong danh sách để chỉnh sửa</span>
+        </div>
+        <div id="propsBody" style="display:none">
+          <div class="prow">
+            <label>TÊN</label>
+            <input id="pName" placeholder="tên cue (hiện trong danh sách)">
+          </div>
+          <div class="prow split">
+            <div>
+              <label>THỜI ĐIỂM KÍCH HOẠT</label>
+              <input id="pTime" class="tc-input">
+            </div>
+            <div>
+              <label>ĐỘ DÀI</label>
+              <input id="pDur" class="tc-input" placeholder="00:00:00:00 = tự động">
+            </div>
+          </div>
+          <div class="prow">
+            <label>ĐỊA CHỈ OSC</label>
+            <input id="pAddr" class="mono">
+          </div>
+          <div class="prow">
+            <label>THAM SỐ</label>
+            <input id="pArgs" class="mono" placeholder="1 · cách nhau bởi dấu phẩy">
+          </div>
+          <div class="prow">
+            <label>GHI CHÚ</label>
+            <input id="pNote" placeholder="ghi chú cho cue này">
+          </div>
+          <div class="prow">
+            <label>CHẾ ĐỘ</label>
+            <div class="modebtns">
+              <button id="pModeTrigger" class="modebtn">● Trigger</button>
+              <button id="pModePiano" class="modebtn">🎹 Piano</button>
+              <button id="pModeFloat" class="modebtn">√ Float</button>
+            </div>
+          </div>
+          <div class="prow">
+            <label>MÀU</label>
+            <div id="pSwatches"></div>
+          </div>
+          <div class="prow">
+            <label></label>
+            <label class="radio"><input type="checkbox" id="pEnabled" checked> Bật (gửi khi phát)</label>
+            <span class="spacer"></span>
+            <button id="pDelete" class="danger">Xóa cue</button>
+          </div>
+          <button id="pPlayNow" class="playnow">▶ Phát ngay</button>
+        </div>
+      </div>
+      <div id="musicBar">
+        <span id="audioName">chưa chọn nhạc — kéo bài từ danh sách NHÁC vào timeline</span>
+        <span class="spacer"></span>
+        <label class="inline">🔊<input type="range" id="vol" min="0" max="1" step="0.01" value="0.9"></label>
+        <label class="inline" title="Khi hết bài, tự chuyển sang bài kế tiếp trong danh sách"><input type="checkbox" id="autoAdvChk" checked> Tự chuyển bài</label>
+        <label class="inline"><input type="checkbox" id="followChk" checked> Theo thanh đò</label>
+        <span class="zoom">
+          <button id="btnZoomOut">−</button><button id="btnZoomIn">+</button>
+        </span>
+      </div>
+    </section>
+
+    <aside id="oscPanel">
+      <div class="panel-head">KẾT NỐI OSC</div>
+      <div class="panel-sec">
+        <div class="row">
+          <label>Cổng nghe</label>
+          <input id="listenPort" type="number" value="7000" min="1024" max="65535">
+          <button id="btnApplyPort">Áp dụng</button>
+        </div>
+        <div class="row">
+          <label>Trạng thái</label>
+          <span id="oscStatus" class="pill off">…</span>
+        </div>
+        <div class="row">
+          <label>Gửi tới</label>
+          <input id="targetHost" value="127.0.0.1" style="width:100px">
+          <input id="targetPort" type="number" value="7001" style="width:64px">
+        </div>
+        <button id="btnCheckResolume" title="Gửi lệnh test (bật clip Layer 1 Clip 1) và chờ phản hồi">
+          Kiểm tra Resolume
+        </button>
+        <div class="hint">Mặc định khớp Resolume trên máy này: app nghe :7000 (Resolume Output), gửi lệnh tới :7001 (Resolume Input). Nếu không nhận được: Arena → Preferences → OSC → <b>Output</b> bật lên, Address 127.0.0.1, Port <b>7000</b>.</div>
+      </div>
+
+      <div class="panel-head">GHI / BỘ LỌC</div>
+      <div class="panel-sec">
+        <div class="row">
+          <label>Ghi vào</label>
+          <select id="recFolderSel" title="Thư mục nhận cue khi ghi"></select>
+        </div>
+        <div class="row">
+          <label>Lane ghi</label>
+          <select id="recLaneSel" title="Lane R nhận cue khi ghi"></select>
+        </div>
+        <div class="row">
+          <label>Ghi gì</label>
+          <select id="filterSel">
+            <option value="connect" selected>Chỉ clip connect (khuyên dùng)</option>
+            <option value="connectcol">Clip connect + cột</option>
+            <option value="all">Tất cả (trừ phản hồi tần suất cao)</option>
+            <option value="custom">Regex tuỳ chỉnh…</option>
+          </select>
+        </div>
+        <input id="filterRegex" placeholder="regex, ví dụ /connect$" style="display:none">
+        <div class="hint" id="filterHint"></div>
+        <div class="row">
+          <label>Chế độ</label>
+          <label class="radio"><input type="radio" name="recMode" value="overdub" checked> Ghi thêm</label>
+          <label class="radio"><input type="radio" name="recMode" value="overwrite"> Ghi đè</label>
+        </div>
+        <div class="hint">Bật <b>● REC</b> là đồng hồ tự chạy và mọi OSC khớp bộ lọc được ghi thành cue vào thư mục đang chọn.</div>
+      </div>
+
+      <div class="panel-head">GỬI THỬ</div>
+      <div class="panel-sec">
+        <input id="testAddr" value="/composition/layers/1/clips/1/connect">
+        <div class="row">
+          <input id="testArgs" value="1" style="flex:1" placeholder="tham số, phẩy cách nhau">
+          <button id="btnTestSend">Gửi</button>
+        </div>
+      </div>
+
+      <div class="panel-head" id="monHead">
+        MONITOR — OSC NHẬN ĐƯỢC
+        <span class="spacer"></span>
+        <label class="inline small"><input type="checkbox" id="monPause"> Tạm dừng</label>
+        <button id="btnMonClear" class="mini">Xóa</button>
+      </div>
+      <input id="monFilter" class="search" placeholder="🔍 Lọc OSC nhận được…" style="margin-bottom:4px">
+      <div id="monitor"></div>
+      <div class="panel-sec" style="border-bottom:none">
+        <div class="hint">Nhấn <b>＋</b> trên từng dòng OSC để biến nó thành cue (tại thanh đò, vào thư mục đang chọn).</div>
+      </div>
+
+      <div class="panel-head">
+        OSC ĐÃ NHẬN — TẠO CUE
+        <span class="spacer"></span>
+        <button id="btnOscToCues" class="mini primary" title="Tạo cue từ mọi OSC chưa lưu, tại thanh đò">Tất cả → Cue</button>
+      </div>
+      <div id="oscSeenList" style="padding:6px 8px;font-size:11px;color:#85858f;"></div>
+    </aside>
+  </main>
+
+  <footer id="statusbar">
+    <span id="sbLeft">Sẵn sàng</span>
+    <span class="spacer"></span>
+    <span id="sbStats">RX 0 · TX 0 · Cue 0</span>
+  </footer>
+
+  <audio id="player"></audio>
+  <script src="app.js"></script>
+</body>
+</html>
