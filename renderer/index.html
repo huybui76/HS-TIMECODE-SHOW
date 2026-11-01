@@ -37,6 +37,11 @@
           <button data-act="follow">Bật/tắt "Theo thanh đò"</button>
         </div>
       </div>
+      <div class="menu"><button class="menu-btn">Tool</button>
+        <div class="menu-drop">
+          <button data-act="testosc">🧪 Test OSC — nhận từ Resolume…</button>
+        </div>
+      </div>
       <div class="menu"><button class="menu-btn">Trợ giúp</button>
         <div class="menu-drop">
           <button data-act="help">Hướng dẫn nhanh</button>
@@ -96,6 +101,7 @@
         <button id="btnCueDown" title="Tăng cue 1 frame">↓</button>
       </div>
       <input id="cueSearch" class="search" placeholder="🔍 Tìm cue — tên hoặc số…">
+      <label class="inline small showall"><input type="checkbox" id="showAllChk"> Hiện cue của MỌI thư mục trên timeline</label>
       <div id="folderList"></div>
 
       <div class="panel-head">
@@ -110,6 +116,8 @@
       <input id="songSearch" class="search" placeholder="🔍 Tìm nhạc — tên hoặc số…">
       <div id="songList"></div>
     </aside>
+
+    <div id="splitL" class="vsplit" title="Kéo để đổi độ rộng panel"></div>
 
     <section id="center">
       <div id="infoStrip">
@@ -143,6 +151,12 @@
           <button id="btnSelDel" class="danger" title="Xóa (Del)">Xóa</button>
           <button id="btnSelNone" title="Bỏ chọn">Bỏ chọn</button>
         </span>
+        <label class="inline small zoomer" title="Độ rộng hiển thị — kéo để thu/phóng toàn bộ layer ngang">
+          ⇔ RỘNG <input type="range" id="ppsRange" min="0" max="100" value="50">
+        </label>
+        <label class="inline small zoomer" title="Độ cao lane — kéo để cao/thấp toàn bộ layer dọc">
+          ⇕ CAO <input type="range" id="rowHRange" min="24" max="96" value="38">
+        </label>
         <span class="spacer"></span>
         <span id="tlStats" class="hint">0 cue · 0 lane</span>
       </div>
@@ -162,6 +176,7 @@
         <button id="mrDedupe" title="Xóa cue trùng (cùng địa chỉ + cùng thời điểm, trong thư mục đang chọn)">Dọn trùng</button>
         <button id="mrMonitor" title="Mở bảng MONITOR xem toàn bộ OSC nhận được">Monitor ⇗</button>
       </div>
+      <div id="hsplitProps" class="hsplit" title="Kéo để đổi độ cao bảng thuộc tính"></div>
       <div id="propsPanel">
         <div id="propsHead">
           <span>THUỘC TÍNH CUE</span>
@@ -308,6 +323,8 @@
       </div>
       <div id="oscSeenList" style="padding:6px 8px;font-size:11px;color:#85858f;"></div>
     </aside>
+
+    <div id="splitR" class="vsplit" title="Kéo để đổi độ rộng panel"></div>
   </main>
 
   <footer id="statusbar">
@@ -317,6 +334,41 @@
   </footer>
 
   <audio id="player"></audio>
+
+  <!-- Modal Test OSC -->
+  <div id="testOscModal" class="modal" style="display:none">
+    <div class="modal-box">
+      <div class="modal-head">
+        <span>🧪 TEST OSC — NHẬN TỪ RESOLUME</span>
+        <span class="spacer"></span>
+        <span id="toCount" class="rx-badge">0 gói</span>
+        <button id="toClose" class="mini" title="Đóng">✕</button>
+      </div>
+      <div class="modal-toolbar">
+        <button id="toStart" class="primary">▶ Bắt đầu nhận</button>
+        <button id="toStop" disabled>■ Dừng nhận</button>
+        <span class="spacer"></span>
+        <button id="toClear" class="mini">Xóa bảng</button>
+      </div>
+      <div class="modal-toolbar filters">
+        <input id="toFilterText" placeholder="🔍 Lọc địa chỉ chứa…">
+        <input id="toFilterRegex" placeholder="Regex, ví dụ /layers/\\d+/connect" style="flex:1">
+        <select id="toFilterType">
+          <option value="all" selected>Mọi loại OSC</option>
+          <option value="trigger">Trigger (không đối số)</option>
+          <option value="float">Float (0–1)</option>
+          <option value="int">Int</option>
+          <option value="string">String</option>
+        </select>
+        <label class="inline small"><input type="checkbox" id="toAutoScroll" checked> Tự cuộn</label>
+      </div>
+      <div class="to-grid-head">
+        <span>THỜI GIAN</span><span>ĐỊA CHỈ OSC</span><span>LOẠI</span><span>ĐỐI SỐ</span>
+      </div>
+      <div id="toRows"></div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>

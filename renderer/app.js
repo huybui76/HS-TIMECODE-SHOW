@@ -30,7 +30,10 @@ const state = {
   // view timeline
   viewStart: 0,
   pps: 0,
-  ppsInit: false
+  ppsInit: false,
+  showAllFolders: false,   // false: timeline chỉ hiện cue của thư mục đang chọn
+  rowH: 38,                // chiều cao lane V/R (to hơn 30%)
+  aRowH: 60                // chiều cao lane A
 };
 
 const LANE_COLORS = ['#4f8cff', '#9a6bff', '#3ecfb2', '#e5c25a', '#ff8a5c', '#5cd6ff', '#ff6b9d', '#a8e34d'];
@@ -252,9 +255,21 @@ function lowerBoundFlat(t) {
   return lo;
 }
 
+/* Các cue hiển thị trên timeline: mặc định chỉ thư mục đang chọn */
+let VF = [];
+function refreshVF() {
+  if (state.showAllFolders) VF = flat.filter((x) => !x.f.hidden);
+  else {
+    const f = curFolder();
+    VF = f ? flat.filter((x) => x.f === f) : flat;
+  }
+  return VF;
+}
+
 /* ================= Thư mục cue ================= */
 function addFolder(name) {
-  const f = { id: nid(), name: name || `Thư mục ${state.folders.length + 1}`, offset: 0, events: [] };
+  // mỗi thư mục là một bài timecode riêng — cue luôn bắt đầu TRỐNG
+  const f = { id: nid(), name: name || `Thư mục ${state.folders.length + 1}`, offset: 0, events: [], color: '', hidden: false };
   state.folders.push(f);
   state.activeFolderId = f.id;
   refreshAll();
@@ -287,8 +302,8 @@ const SWATCHES = [
   '#5a6070', '#46f0b0'
 ];
 
-function cueColor(ev, lane) {
-  return ev.color || laneColor(lane || ev.lane);
+function cueColor(ev, lane, folder) {
+  return ev.color || (folder && folder.color) || laneColor(lane || ev.lane);
 }
 
 function cueLabel(ev) {
@@ -309,6 +324,7 @@ function renderFolders() {
   state.folders.forEach((f) => {
     const div = document.createElement('div');
     div.className = 'folder' + (f.id === state.activeFolderId ? ' active' : '');
+    if (f.color) div.style.borderLeft = `3px solid ${f.color}`;
 
     const head = document.createElement('div');
     head.className = 'fhead';
@@ -321,14 +337,33 @@ function renderFolders() {
     const cnt = document.createElement('span');
     cnt.className = 'fcnt';
     cnt.textContent = f.events.length;
+    const eye = document.createElement('button');
+    eye.className = 'fdel';
+    eye.textContent = f.hidden ? '🙈' : '👁';
+    eye.title = f.hidden ? 'Cue thư mục này đang ẨN trên timeline — bấm để hiện' : 'Ẩn cue thư mục này trên timeline';
+    eye.addEventListener('click', (e) => {
+      e.stopPropagation();
+      f.hidden = !f.hidden;
+      refreshVF();
+      renderFolders();
+      scheduleAutosave();
+    });
+    const colBtn = document.createElement('button');
+    colBtn.className = 'fdel fcol';
+    colBtn.textContent = '🎨';
+    colBtn.title = 'Đổi màu thư mục (tô màu cue bên trong)';
+    colBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openFolderPalette(f, colBtn);
+    });
     const del = document.createElement('button');
     del.className = 'fdel';
     del.textContent = '🗑';
     del.title = 'Xóa thư mục';
     del.addEventListener('click', (e) => { e.stopPropagation(); removeFolder(f.id); });
-    head.append(name, cnt, del);
+    head.append(name, cnt, eye, colBtn, del);
     head.addEventListener('click', (e) => {
-      if (e.target === name || e.target === del) return;
+      if (e.target === name || e.target === del || e.target === eye || e.target === colBtn) return;
       state.activeFolderId = f.id;
       fillRecFolderSel();
       renderFolders();
@@ -367,8 +402,9 @@ function renderFolders() {
       row.className = 'cue-row' + (selSet().has(ev) ? ' sel' : '');
       row.draggable = true;
       row.addEventListener('dragstart', (e) => {
-        e.dataTransfer.setData('text/hs-cue', `${f.id}:${ev.id}`);
-        e.dataTransfer.effectAllowed = 'copyMove';
+        // kéo từ danh sách luôn tạo bản sao — cue gốc ở lại, kéo được nhiều lần
+        e.dataTransfer.setData('text/hs-cue', `${f.id}:${ev.id}:1`);
+        e.dataTransfer.effectAllowed = 'copy';
       });
       if (ev.color) row.style.boxShadow = `inset 3px 0 0 ${ev.color}`;
       if (ev.enabled === false) row.style.opacity = '0.45';
@@ -411,6 +447,49 @@ function renderFolders() {
     div.appendChild(cuesBox);
     box.appendChild(div);
   });
+}
+
+function openFolderPalette(f, anchor) {
+  document.querySelectorAll('.folder-palette').forEach((p) => p.remove());
+  const pal = document.createElement('div');
+  pal.className = 'folder-palette';
+  const mk = (c) => {
+    const b = document.createElement('button');
+    b.className = 'swatch' + (f.color === c ? ' sel' : '');
+    b.style.background = c;
+    b.title = f.color === c ? 'Bỏ màu' : c;
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      f.color = f.color === c ? '' : c;
+      pal.remove();
+      refreshAll();
+      scheduleAutosave();
+    });
+    return b;
+  };
+  SWATCHES.forEach((c) => pal.appendChild(mk(c)));
+  const rb = document.createElement('button');
+  rb.className = 'swatch none';
+  rb.textContent = '✕';
+  rb.title = 'Bỏ màu (dùng màu lane)';
+  rb.addEventListener('click', (e) => {
+    e.stopPropagation();
+    f.color = '';
+    pal.remove();
+    refreshAll();
+    scheduleAutosave();
+  });
+  pal.appendChild(rb);
+  document.body.appendChild(pal);
+  const r = anchor.getBoundingClientRect();
+  pal.style.left = Math.min(r.left, window.innerWidth - 200) + 'px';
+  pal.style.top = (r.bottom + 4) + 'px';
+  setTimeout(() => {
+    const close = (ev) => {
+      if (!pal.contains(ev.target)) { pal.remove(); document.removeEventListener('mousedown', close); }
+    };
+    document.addEventListener('mousedown', close);
+  }, 0);
 }
 
 function editCueTc(folder, ev, span) {
@@ -724,7 +803,7 @@ function fireDue() {
 }
 
 function nextCue() {
-  for (const x of flat) {
+  for (const x of refreshVF()) {
     if (x.t > state.frame && x.ev.enabled !== false) return x;
   }
   return null;
@@ -739,6 +818,7 @@ function sendOsc(address, args) {
 /* ================= Ghi OSC ================= */
 function refreshAll() {
   rebuildFlat();
+  refreshVF();
   state.playbackIdx = lowerBoundFlat(state.frame);
   renderFolders();
   fillRecFolderSel();
@@ -765,6 +845,7 @@ function onOscMessage(msg) {
   rxLocal++;
   monRow(msg.address, msg.args, false);
   recordOscSeen(msg.address, msg.args);
+  if (TEST_OSC.on) toRecord(msg);
   const badge = $('mrRx');
   badge.textContent = 'RX ' + rxLocal;
   badge.classList.add('flash');
@@ -798,24 +879,26 @@ function cueFromOsc(address, args) {
 }
 
 /* ================= Timeline ================= */
-const GUT = 46, TOP = 24, ROW = 28, A1H = 46;
+const GUT = 56, TOP = 30;
 
 function frameToX(f) { return ((f / state.fps) - state.viewStart) * state.pps + GUT; }
 function xToFrame(x) { return ((x - GUT) / state.pps + state.viewStart) * state.fps; }
 
-function eventEndFrame(x) {
-  if (x.ev.duration > 0) return x.t + x.ev.duration;
-  const idx = flat.indexOf(x);
-  for (let j = idx + 1; j < flat.length; j++) {
-    if (flat[j].ev.lane === x.ev.lane) return flat[j].t;
+function autoDur(t, lane) {
+  for (const fx of VF) {
+    if (fx.ev.lane === lane && fx.t > t) return Math.max(1, fx.t - t);
   }
-  return x.t + Math.round(state.fps * 0.75);
+  return Math.round(state.fps * 0.75);
+}
+
+function eventEndFrame(x) {
+  return x.t + (x.ev.duration > 0 ? x.ev.duration : autoDur(x.t, x.ev.lane));
 }
 
 function timelineRows() {
   const rows = state.lanes.map((l) => ({
     lane: l.name, id: l.id, kind: l.kind, songId: l.songId,
-    h: l.kind === 'A' ? A1H : ROW, isAudio: l.kind === 'A'
+    h: l.kind === 'A' ? state.aRowH : state.rowH, isAudio: l.kind === 'A'
   }));
   let y = TOP + 6;
   rows.forEach((r) => { r.y = y; y += r.h; });
@@ -926,8 +1009,9 @@ function drawTimeline() {
     }
   });
 
-  // cue (đã cộng OFFSET từng thư mục)
-  flat.forEach((x) => {
+  // cue (đã cộng OFFSET từng thư mục) — chỉ vùng nhìn hiện tại
+  refreshVF();
+  VF.forEach((x) => {
     const row = rows.find((r) => r.lane === x.ev.lane);
     if (!row) return;
     const x1 = frameToX(x.t);
@@ -935,19 +1019,24 @@ function drawTimeline() {
     if (x2 < GUT || x1 > W) return;
     const bx = Math.max(x1, GUT), bw = Math.max(3, x2 - x1 - 2);
     const isSelected = selSet().has(x.ev);
-    ctx.fillStyle = cueColor(x.ev);
-    ctx.globalAlpha = isSelected ? 1 : (x.ev.enabled === false ? 0.3 : 0.78);
+    ctx.fillStyle = cueColor(x.ev, null, x.f);
+    ctx.globalAlpha = isSelected ? 1 : (x.ev.enabled === false ? 0.3 : 0.85);
     ctx.fillRect(bx, row.y + 2, bw, row.h - 10);
     ctx.globalAlpha = 1;
+    // gợn mép hai bên — gợi ý có thể kéo đổi độ dài
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    if (bw > 10) { ctx.fillRect(bx, row.y + 2, 3, row.h - 10); ctx.fillRect(bx + bw - 3, row.y + 2, 3, row.h - 10); }
     if (isSelected) {
       ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.5;
       ctx.strokeRect(bx + .5, row.y + 2.5, bw - 1, row.h - 11);
+      ctx.lineWidth = 1;
     }
-    if (bw > 34) {
+    if (bw > 30) {
       ctx.fillStyle = '#0b0b0e';
-      ctx.font = '9px Menlo, monospace';
-      const label = x.ev.address.split('/').slice(-2).join('/');
-      ctx.fillText(label.slice(0, Math.floor(bw / 6)), bx + 4, row.y + (row.h - 6) / 2);
+      ctx.font = 'bold 12px Menlo, monospace';
+      const label = cueLabel(x.ev);
+      ctx.fillText(label.slice(0, Math.floor(bw / 7.5)), bx + 7, row.y + (row.h - 6) / 2);
     }
   });
 
@@ -982,7 +1071,7 @@ function hitCueBlock(x, y) {
   const row = hitLaneRow(y);
   if (!row) return null;
   const t = xToFrame(x);
-  for (const fx of flat) {
+  for (const fx of refreshVF()) {
     if (fx.ev.lane !== row.lane) continue;
     if (t >= fx.t && t < eventEndFrame(fx)) return { fx, row };
   }
@@ -1003,14 +1092,32 @@ canvas.addEventListener('mousedown', (e) => {
     const row = hitLaneRow(y);
     if (row) { removeLane(row.id); e.preventDefault(); return; }
   }
-  // bắt đầu kéo khối cue: mép phải = đổi độ dài, thân = dời
+  // bấm vào thanh đò (playhead) → kéo ngang
+  const px = frameToX(state.frame);
+  if (Math.abs(x - px) <= 8) {
+    dragInfo = { mode: 'scrub', x, y, moved: false };
+    canvas.style.cursor = 'ew-resize';
+    return;
+  }
+  // bắt đầu kéo khối cue: mép = đổi độ dài (2 đầu), thân = dời
   const hit = hitCueBlock(x, y);
   if (hit && x >= GUT) {
     const f = state.folders.find((fo) => fo.events.includes(hit.fx.ev));
-    const endX = frameToX(eventEndFrame(hit.fx));
-    const mode = (hit.fx.ev.duration > 0 && Math.abs(x - endX) <= 6) ? 'resize' : 'move';
-    blockDrag = { fx: hit.fx, folder: f, mouse: { x, y }, moved: false, mode };
-    canvas.style.cursor = mode === 'resize' ? 'ew-resize' : 'grabbing';
+    const x1 = frameToX(hit.fx.t);
+    const x2 = frameToX(eventEndFrame(hit.fx));
+    let mode = 'move';
+    if (Math.abs(x - x2) <= 7) mode = 'resize-r';
+    else if (Math.abs(x - x1) <= 7 && eventEndFrame(hit.fx) - hit.fx.t > 2) mode = 'resize-l';
+    blockDrag = {
+      ev: hit.fx.ev, folder: f, mode, mouse: { x, y }, moved: false,
+      copy: e.altKey,                  // Alt = kéo thả tạo bản sao
+      f0: hit.fx.t - f.offset,         // frame gốc (nếu Alt-copy thì trả lại cho cue gốc)
+      dur0: hit.fx.ev.duration || 0,
+      grabF: xToFrame(x) - hit.fx.t,   // điểm nắm trong khối
+      end0: eventEndFrame(hit.fx),
+      lane0: hit.fx.ev.lane
+    };
+    canvas.style.cursor = mode === 'move' ? 'grabbing' : 'ew-resize';
     return;
   }
   dragInfo = { x, y, moved: false, viewStart0: state.viewStart };
@@ -1020,16 +1127,43 @@ canvas.addEventListener('mousemove', (e) => {
   const x = e.clientX - r.left, y = e.clientY - r.top;
   mousePos = { x, y };
   if (blockDrag) {
-    if (Math.abs(x - blockDrag.mouse.x) > 2 || Math.abs(y - blockDrag.mouse.y) > 2) blockDrag.moved = true;
+    if (!blockDrag.moved && (Math.abs(x - blockDrag.mouse.x) > 2 || Math.abs(y - blockDrag.mouse.y) > 2)) blockDrag.moved = true;
+    if (blockDrag.moved) {
+      // CẬP NHẬT NGAY khi kéo — mượt như edit video
+      const ev = blockDrag.ev;
+      const entry = flat.find((p) => p.ev === ev);
+      if (blockDrag.mode === 'move') {
+        ev.frame = Math.max(0, Math.round(xToFrame(x) - blockDrag.grabF) - blockDrag.folder.offset);
+        const row = hitLaneRow(y);
+        if (row && !row.isAudio && row.lane !== ev.lane) ev.lane = row.lane;
+      } else if (blockDrag.mode === 'resize-r') {
+        ev.duration = Math.max(1, Math.round(xToFrame(x)) - (entry ? entry.t : 0));
+      } else { // resize-l
+        const newStart = Math.round(xToFrame(x));
+        ev.duration = Math.max(1, blockDrag.end0 - Math.min(newStart, blockDrag.end0 - 1));
+        ev.frame = Math.max(0, newStart - blockDrag.folder.offset);
+      }
+      rebuildFlat();
+    }
     return;
   }
-  // con trỏ gợi ý vùng đổi độ dài ở mép phải khối cue
-  if (!dragInfo && !blockDrag) {
+  // gợi ý con trỏ: thanh đò + mép cue = kéo ngang, thân cue = grab
+  if (!dragInfo) {
+    const px = frameToX(state.frame);
     const hit = hitCueBlock(x, y);
-    canvas.style.cursor = (hit && hit.fx.ev.duration > 0 && Math.abs(x - frameToX(eventEndFrame(hit.fx))) <= 6)
-      ? 'ew-resize' : 'crosshair';
+    let cur = 'crosshair';
+    if (Math.abs(x - px) <= 8) cur = 'ew-resize';
+    else if (hit) {
+      const x1 = frameToX(hit.fx.t), x2 = frameToX(eventEndFrame(hit.fx));
+      cur = (Math.abs(x - x2) <= 7 || Math.abs(x - x1) <= 7) ? 'ew-resize' : 'grab';
+    }
+    canvas.style.cursor = cur;
+    return;
   }
-  if (!dragInfo) return;
+  if (dragInfo.mode === 'scrub') {
+    setFrame(Math.max(0, Math.round(xToFrame(x))));
+    return;
+  }
   if (Math.abs(x - dragInfo.x) > 4) dragInfo.moved = true;
   if (dragInfo.moved) {
     state.viewStart = Math.max(0, dragInfo.viewStart0 - (x - dragInfo.x) / state.pps);
@@ -1037,35 +1171,39 @@ canvas.addEventListener('mousemove', (e) => {
 });
 canvas.addEventListener('mouseleave', () => { dragInfo = null; mousePos = { x: -1, y: -1 }; });
 canvas.addEventListener('mouseup', (e) => {
-  const r = canvas.getBoundingClientRect();
-  const x = e.clientX - r.left, y = e.clientY - r.top;
   if (blockDrag) {
-    if (blockDrag.mode === 'resize') {
-      if (blockDrag.moved && blockDrag.folder) {
-        const ev = blockDrag.fx.ev;
-        const newDur = Math.max(1, Math.round(xToFrame(x)) - blockDrag.fx.t);
-        ev.duration = newDur;
+    const ev = blockDrag.ev;
+    if (blockDrag.moved && blockDrag.folder) {
+      const f = blockDrag.folder;
+      if (blockDrag.copy && blockDrag.mode === 'move') {
+        // Alt = bản sao: cue gốc về chỗ cũ, bản mới ở vị trí đã kéo
+        const dup = makeCue(Math.max(0, ev.frame), ev.address, JSON.parse(JSON.stringify(ev.args || [1])));
+        dup.name = ev.name; dup.duration = ev.duration || 0;
+        dup.note = ev.note || ''; dup.color = ev.color || '';
+        dup.mode = ev.mode || 'trigger'; dup.lane = ev.lane;
+        insertCue(f, dup);
+        ev.frame = blockDrag.f0;
+        ev.lane = blockDrag.lane0;
+        ev.duration = blockDrag.dur0 !== undefined ? blockDrag.dur0 : ev.duration;
+        state.sel = dup;
+        state.multiSel = new Set([dup]);
         refreshAll();
         renderProps();
-        flashStatus(`Độ dài cue = ${tcString(newDur, state.fps)}`);
+        flashStatus(`Đã tạo bản sao tại ${tcString(f.offset + dup.frame, state.fps)} trên ${dup.lane}`);
+      } else {
+        const i = f.events.indexOf(ev);
+        if (i >= 0) f.events.splice(i, 1);
+        insertCue(f, ev); // sắp lại thứ tự trong thư mục
+        state.sel = ev;
+        state.multiSel = new Set([ev]);
+        refreshAll();
+        renderProps();
+        flashStatus(blockDrag.mode === 'move'
+          ? `Đã dời cue tới ${tcString(f.offset + ev.frame, state.fps)} trên ${ev.lane}`
+          : `Độ dài cue = ${tcString(ev.duration || 0, state.fps)}`);
       }
-    } else if (blockDrag.moved && blockDrag.folder) {
-      const newT = Math.round(xToFrame(x)) - blockDrag.folder.offset;
-      const row = hitLaneRow(y);
-      const ev = blockDrag.fx.ev;
-      const i = blockDrag.folder.events.indexOf(ev);
-      if (i >= 0) blockDrag.folder.events.splice(i, 1);
-      ev.frame = Math.max(0, newT);
-      if (row && !row.isAudio) ev.lane = row.lane;
-      insertCue(blockDrag.folder, ev); // chèn lại — trước đây bị thiếu làm cue biến mất
-      state.sel = ev;
-      state.multiSel = new Set([ev]);
-      refreshAll();
-      renderProps();
-      flashStatus(`Đã dời cue tới ${tcString(blockDrag.folder.offset + ev.frame, state.fps)} trên ${ev.lane}`);
-    } else {
+    } else if (!blockDrag.moved) {
       // click chọn cue (⌘/Ctrl = thêm/bỏ khỏi vùng chọn)
-      const ev = blockDrag.fx.ev;
       if (e.metaKey || e.ctrlKey) {
         if (state.multiSel.has(ev)) state.multiSel.delete(ev);
         else state.multiSel.add(ev);
@@ -1073,7 +1211,8 @@ canvas.addEventListener('mouseup', (e) => {
       } else {
         state.multiSel = new Set([ev]);
         state.sel = ev;
-        if (!state.playing) setFrame(blockDrag.fx.t);
+        const entry = flat.find((p) => p.ev === ev);
+        if (!state.playing && entry) setFrame(entry.t);
       }
       renderFolders();
       renderProps();
@@ -1084,6 +1223,9 @@ canvas.addEventListener('mouseup', (e) => {
     return;
   }
   if (!dragInfo) return;
+  const r = canvas.getBoundingClientRect();
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  if (dragInfo.mode === 'scrub') { dragInfo = null; return; }
   if (!dragInfo.moved && x >= GUT) {
     const row = hitLaneRow(y);
     if (row && row.isAudio) {
@@ -1129,22 +1271,33 @@ canvas.addEventListener('drop', (e) => {
   if (cid && !sid) {
     e.preventDefault();
     e.stopPropagation();
-    const [fid, ceid] = cid.split(':').map(Number);
-    const f = state.folders.find((fo) => fo.id === fid);
-    const ev = f && f.events.find((c) => c.id === ceid);
-    if (ev && f) {
+    const [fid, ceid, isCopy] = cid.split(':').map(Number);
+    const srcF = state.folders.find((fo) => fo.id === fid);
+    const src = srcF && srcF.events.find((c) => c.id === ceid);
+    if (src && srcF) {
       const row = hitLaneRow(y);
-      const i = f.events.indexOf(ev);
-      if (i >= 0) f.events.splice(i, 1);
-      ev.frame = Math.max(0, Math.round(xToFrame(x)) - f.offset);
-      if (row && !row.isAudio) ev.lane = row.lane;
-      insertCue(f, ev); // chèn lại — trước đây bị thiếu làm cue biến mất
-      state.sel = ev;
-      state.multiSel = new Set([ev]);
+      // thả từ DANH SÁCH CUE hoặc giữ Alt = tạo bản sao — cue gốc giữ nguyên, kéo được nhiều lần
+      const wantCopy = isCopy === 1 || e.altKey;
+      let target = srcF;
+      let cue = src;
+      if (wantCopy) {
+        cue = makeCue(0, src.address, JSON.parse(JSON.stringify(src.args || [1])));
+        cue.name = src.name; cue.duration = src.duration || 0;
+        cue.note = src.note || ''; cue.color = src.color || '';
+        cue.mode = src.mode || 'trigger'; cue.lane = src.lane;
+      } else {
+        const i = target.events.indexOf(src);
+        if (i >= 0) target.events.splice(i, 1);
+      }
+      cue.frame = Math.max(0, Math.round(xToFrame(x)) - target.offset);
+      if (row && !row.isAudio) cue.lane = row.lane;
+      insertCue(target, cue);
+      state.sel = cue;
+      state.multiSel = new Set([cue]);
       updateSelBar();
       refreshAll();
       renderProps();
-      flashStatus(`Đã đặt cue tại ${tcString(f.offset + ev.frame, state.fps)} trên ${ev.lane}`);
+      flashStatus(`Đã đặt cue tại ${tcString(target.offset + cue.frame, state.fps)} trên ${cue.lane}${wantCopy ? ' (bản sao)' : ''}`);
     }
     return;
   }
@@ -1197,29 +1350,31 @@ drawTimeline = function () {
   _drawTimeline();
   if (blockDrag && blockDrag.moved && state.pps) {
     const rows = timelineRows();
-    const row = rows.find((rr) => rr.lane === blockDrag.fx.ev.lane);
+    const row = rows.find((rr) => rr.lane === blockDrag.ev.lane);
     if (row) {
-      const x1 = blockDrag.mode === 'resize'
-        ? frameToX(blockDrag.fx.t)
-        : frameToX(xToFrame(mousePos.x));
-      const bw = blockDrag.mode === 'resize'
-        ? Math.max(3, mousePos.x - x1)
-        : Math.max(3, frameToX(eventEndFrame(blockDrag.fx)) - frameToX(blockDrag.fx.t));
-      ctx.globalAlpha = 0.55;
-      ctx.fillStyle = cueColor(blockDrag.fx.ev);
+      const entry = flat.find((p) => p.ev === blockDrag.ev);
+      const t = entry ? entry.t : blockDrag.folder.offset + blockDrag.ev.frame;
+      const dur = blockDrag.ev.duration > 0
+        ? blockDrag.ev.duration
+        : autoDur(t, blockDrag.ev.lane);
+      const x1 = frameToX(t);
+      const bw = Math.max(4, frameToX(t + dur) - x1);
+      ctx.globalAlpha = 0.75;
+      ctx.fillStyle = cueColor(blockDrag.ev, null, blockDrag.folder);
       ctx.fillRect(x1, row.y + 2, bw, row.h - 10);
       ctx.globalAlpha = 1;
       ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.5;
       ctx.strokeRect(x1 + .5, row.y + 2.5, bw - 1, row.h - 11);
-      if (blockDrag.mode === 'resize') {
-        const dFrames = Math.max(1, Math.round(xToFrame(mousePos.x)) - blockDrag.fx.t);
+      ctx.lineWidth = 1;
+      if (blockDrag.mode !== 'move') {
         ctx.fillStyle = '#fff';
         ctx.font = 'bold 10px Menlo, monospace';
-        ctx.fillText(tcString(dFrames, state.fps), x1 + bw + 6, row.y + (row.h - 6) / 2);
+        ctx.fillText(tcString(dur, state.fps), x1 + bw + 6, row.y + (row.h - 6) / 2);
       }
       // highlight hàng dưới con trỏ
       const hover = hitLaneRow(mousePos.y);
-      if (hover && !hover.isAudio && blockDrag.mode !== 'resize') {
+      if (hover && !hover.isAudio && blockDrag.mode === 'move') {
         ctx.strokeStyle = 'rgba(255,255,255,0.35)';
         ctx.strokeRect(GUT + .5, hover.y + .5, canvas.clientWidth - GUT - 1, hover.h - 7);
       }
@@ -1440,7 +1595,8 @@ const menuActions = {
   zoomout: () => { state.pps = clamp(state.pps / 1.3, 2, 600); },
   home: () => setFrame(0),
   follow: () => { $('followChk').checked = !$('followChk').checked; state.follow = $('followChk').checked; flashStatus('Theo thanh đò: ' + (state.follow ? 'BẬT' : 'TẮT')); },
-  help: () => flashStatus('Quy trình: ① Bật Output trong Resolume (Preferences → OSC → 127.0.0.1:7000) ② Kéo nhạc vào lane A ③ Bật REC, Phát, gõ MIDI ④ Dừng REC, Play lại để chạy show. ⌘-click chọn nhiều cue.')
+  help: () => flashStatus('Quy trình: ① Bật Output trong Resolume (Preferences → OSC → 127.0.0.1:7000) ② Kéo nhạc vào lane A ③ Bật REC, Phát, gõ MIDI ④ Dừng REC, Play lại để chạy show. ⌘-click chọn nhiều cue. Kéo cue từ danh sách vào timeline = tạo bản sao (giữ Alt khi kéo trên timeline cũng vậy).'),
+  testosc: () => openTestOsc()
 };
 
 document.querySelectorAll('#menubar .menu').forEach((menu) => {
@@ -1786,6 +1942,162 @@ window.hs.onStatus((s) => {
   }
 });
 
+/* ================= Tool: Test OSC (nhận từ Resolume) ================= */
+const TEST_OSC = { on: false, rows: [], text: '', regex: '', type: 'all', max: 500 };
+
+function oscTypeOf(args) {
+  if (!args || !args.length) return 'trigger';
+  if (args.every((a) => typeof a === 'string')) return 'string';
+  if (args.every((a) => Number.isInteger(a))) return 'int';
+  return 'float';
+}
+
+function oscTypeLabel(t) {
+  return { trigger: 'trigger', float: 'float', int: 'int', string: 'string' }[t] || t;
+}
+
+function toPassFilters(msg) {
+  if (TEST_OSC.text && !msg.address.toLowerCase().includes(TEST_OSC.text)) return false;
+  if (TEST_OSC.regex) {
+    try { if (!new RegExp(TEST_OSC.regex).test(msg.address)) return false; }
+    catch (_) { /* regex sai → bỏ qua */ }
+  }
+  if (TEST_OSC.type !== 'all' && oscTypeOf(msg.args) !== TEST_OSC.type) return false;
+  return true;
+}
+
+function openTestOsc() {
+  $('testOscModal').style.display = 'flex';
+  renderTestOscRows();
+}
+
+function closeTestOsc() { $('testOscModal').style.display = 'none'; }
+
+function renderTestOscRows() {
+  const box = $('toRows');
+  box.innerHTML = '';
+  const shown = TEST_OSC.rows.filter(toPassFilters).slice(-300);
+  shown.forEach((m) => {
+    const div = document.createElement('div');
+    div.className = 'to-row' + (m.tx ? ' tx' : '');
+    const t = document.createElement('span'); t.textContent = m.t;
+    const a = document.createElement('span'); a.className = 'addr'; a.textContent = m.address;
+    const ty = document.createElement('span'); ty.className = 'typ'; ty.textContent = oscTypeLabel(m.type);
+    const v = document.createElement('span'); v.className = 'args'; v.textContent = (m.args || []).join(', ');
+    div.append(t, a, ty, v);
+    div.addEventListener('click', () => cueFromOsc(m.address, m.args));
+    box.appendChild(div);
+  });
+  $('toCount').textContent = `${TEST_OSC.rows.length} gói`;
+  if ($('toAutoScroll').checked) box.scrollTop = box.scrollHeight;
+}
+
+function toRecord(msg) {
+  const d = new Date();
+  const t = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+  TEST_OSC.rows.push({ t, address: msg.address, args: msg.args, type: oscTypeOf(msg.args), tx: false });
+  while (TEST_OSC.rows.length > TEST_OSC.max) TEST_OSC.rows.shift();
+  if ($('testOscModal').style.display !== 'none') renderTestOscRows();
+}
+
+$('toClose').addEventListener('click', closeTestOsc);
+$('testOscModal').addEventListener('mousedown', (e) => { if (e.target === $('testOscModal')) closeTestOsc(); });
+$('toStart').addEventListener('click', () => {
+  TEST_OSC.on = true;
+  $('toStart').disabled = true;
+  $('toStart').textContent = '● Đang nhận…';
+  $('toStart').classList.add('armed');
+  $('toStop').disabled = false;
+  flashStatus('Test OSC: đang nhận mọi OSC đến cổng nghe. Bấm OSC trong bảng để tạo cue.');
+});
+$('toStop').addEventListener('click', () => {
+  TEST_OSC.on = false;
+  $('toStart').disabled = false;
+  $('toStart').textContent = '▶ Bắt đầu nhận';
+  $('toStart').classList.remove('armed');
+  $('toStop').disabled = true;
+  flashStatus('Test OSC: đã dừng nhận.');
+});
+$('toClear').addEventListener('click', () => { TEST_OSC.rows = []; renderTestOscRows(); });
+$('toFilterText').addEventListener('input', (e) => { TEST_OSC.text = e.target.value.toLowerCase(); renderTestOscRows(); });
+$('toFilterRegex').addEventListener('input', (e) => { TEST_OSC.regex = e.target.value.trim(); renderTestOscRows(); });
+$('toFilterType').addEventListener('change', (e) => { TEST_OSC.type = e.target.value; renderTestOscRows(); });
+
+/* ================= Kéo giãn panel + thanh trượt RỘNG/CAO ================= */
+(function setupSplitters() {
+  const cuePanel = $('cuePanel'), oscPanel = $('oscPanel'), center = $('center');
+  const props = $('propsPanel');
+
+  function dragX(handle, onMove) {
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const mm = (ev) => onMove(ev);
+      const mu = () => {
+        document.removeEventListener('mousemove', mm);
+        document.removeEventListener('mouseup', mu);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      };
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      document.addEventListener('mousemove', mm);
+      document.addEventListener('mouseup', mu);
+    });
+  }
+
+  dragX($('splitL'), (e) => {
+    cuePanel.style.width = clamp(e.clientX, 250, Math.min(620, window.innerWidth * 0.5)) + 'px';
+  });
+  dragX($('splitR'), (e) => {
+    oscPanel.style.width = clamp(window.innerWidth - e.clientX, 250, Math.min(620, window.innerWidth * 0.5)) + 'px';
+  });
+  $('hsplitProps').addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const rect = center.getBoundingClientRect();
+    const mm = (ev) => {
+      const h = clamp(rect.bottom - ev.clientY, 120, rect.height * 0.7);
+      props.style.height = h + 'px';
+    };
+    const mu = () => {
+      document.removeEventListener('mousemove', mm);
+      document.removeEventListener('mouseup', mu);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', mm);
+    document.addEventListener('mouseup', mu);
+  });
+
+  // thanh trượt RỘNG: zoom ngang toàn timeline (đi cùng nút +/− và cuộn chuột)
+  const ppsRange = $('ppsRange');
+  function ppsFromSlider(v) { return 2 * Math.pow(300, v / 100); } // 2 → 600 px/s
+  function sliderFromPps(p) { return Math.round((Math.log(p / 2) / Math.log(300)) * 100); }
+  ppsRange.addEventListener('input', () => {
+    state.pps = ppsFromSlider(Number(ppsRange.value));
+    state.ppsInit = true;
+  });
+  // phản ánh zoom khi cuộn chuột/nút +/−
+  const syncPps = () => { ppsRange.value = sliderFromPps(clamp(state.pps, 2, 600)); };
+  $('btnZoomIn').addEventListener('click', syncPps);
+  $('btnZoomOut').addEventListener('click', syncPps);
+  setTimeout(syncPps, 300);
+
+  // thanh trượt CAO: chiều cao lane toàn bộ layer (V/R; lane A tỉ lệ 1.6×)
+  $('rowHRange').addEventListener('input', (e) => {
+    state.rowH = Number(e.target.value);
+    state.aRowH = clamp(Math.round(state.rowH * 1.6), 30, 150);
+    scheduleAutosave();
+  });
+
+  $('showAllChk').addEventListener('change', (e) => {
+    state.showAllFolders = e.target.checked;
+    refreshVF();
+    scheduleAutosave();
+  });
+})();
+
 /* ================= Panel thuộc tính cue ================= */
 function findSelectedFolder() {
   if (!state.sel) return null;
@@ -1962,13 +2274,16 @@ function scheduleAutosave() {
 
 function serializeProject() {
   return {
-    version: 5,
+    version: 6,
     fps: state.fps,
     autoAdvance: state.autoAdvance,
     activeFolderId: state.activeFolderId,
     recLaneId: state.recLaneId,
     songIndex: state.songIndex,
     folders: state.folders,
+    rowH: state.rowH,
+    aRowH: state.aRowH,
+    showAllFolders: state.showAllFolders,
     lanes: state.lanes,
     songs: state.songs.map((s) => ({ id: s.id, name: s.name, path: s.path, duration: s.duration, size: s.size })),
     settings: {
@@ -1992,18 +2307,26 @@ function migrateCue(e) {
 }
 
 function applyProject(data) {
-  if (!data || ![3, 4, 5].includes(data.version)) { setStatus('File dự án không hợp lệ.'); return; }
+  if (!data || ![3, 4, 5, 6].includes(data.version)) { setStatus('File dự án không hợp lệ.'); return; }
   pause();
   state.fps = data.fps || 30;
   $('fpsSel').value = String(state.fps);
+  state.rowH = data.rowH || 38;
+  state.aRowH = data.aRowH || 60;
+  state.showAllFolders = !!data.showAllFolders;
+  const chk = $('showAllChk'); if (chk) chk.checked = state.showAllFolders;
+  const rh = $('rowHRange'); if (rh) { rh.value = state.rowH; }
+  const ah = $('aRowHRange'); if (ah) { ah.value = state.aRowH; }
   state.folders = (Array.isArray(data.folders) && data.folders.length)
     ? data.folders.map((f) => ({
         id: f.id || nid(),
         name: f.name || 'Thư mục',
         offset: f.offset || 0,
+        color: f.color || '',
+        hidden: !!f.hidden,
         events: Array.isArray(f.events) ? f.events.filter((e) => e && e.address).map(migrateCue) : []
       }))
-    : [{ id: nid(), name: 'Chính', offset: 0, events: [] }];
+    : [{ id: nid(), name: 'Chính', offset: 0, events: [], color: '', hidden: false }];
   state.songs = (Array.isArray(data.songs) ? data.songs : []).map((s) => ({
     id: s.id || nid(), name: s.name || 'Bài', path: s.path || '',
     duration: s.duration || 0, size: s.size || 0, peaks: null, decoding: false
@@ -2108,7 +2431,7 @@ function selectAllCues() {
     const saved = localStorage.getItem(AUTOSAVE_KEY);
     if (saved) {
       const data = JSON.parse(saved);
-      if ([3, 4, 5].includes(data.version)) { applyProject(data); restored = true; }
+      if ([3, 4, 5, 6].includes(data.version)) { applyProject(data); restored = true; }
     }
   } catch (_) { /* bỏ qua */ }
   if (!restored) refreshAll();
