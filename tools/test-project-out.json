@@ -1,0 +1,142 @@
+{
+  "version": 7,
+  "fps": 30,
+  "folders": [
+    {
+      "id": "F1",
+      "name": "Bài 1",
+      "offset": 0,
+      "color": "",
+      "hidden": false,
+      "collapsed": false,
+      "cues": [
+        {
+          "id": "cue1",
+          "address": "/test/1",
+          "args": [
+            1
+          ],
+          "name": "Cue 1",
+          "note": "",
+          "color": "",
+          "mode": "trigger"
+        },
+        {
+          "id": "cue2",
+          "address": "",
+          "args": [
+            1
+          ],
+          "name": "Cue 2 — không OSC",
+          "note": "",
+          "color": "",
+          "mode": "trigger"
+        },
+        {
+          "id": "cue3",
+          "args": [
+            1
+          ],
+          "name": "Cue 3 — address undefined",
+          "note": "",
+          "color": "",
+          "mode": "trigger"
+        },
+        {
+          "id": "cue4",
+          "address": "",
+          "name": "Cue 4 — không args",
+          "note": null,
+          "color": null
+        },
+        {
+          "id": "cue5",
+          "address": "/test/5",
+          "args": [
+            "/x",
+            2
+          ],
+          "name": "Cue 5",
+          "note": "gợi ý",
+          "color": "#fff",
+          "mode": "hold"
+        },
+        {
+          "id": "cue6",
+          "address": null,
+          "args": null,
+          "name": null,
+          "note": null,
+          "color": null,
+          "mode": null
+        }
+      ],
+      "events": [
+        {
+          "id": "ID1001",
+          "cueId": "cue1",
+          "frame": 0,
+          "lane": "V1",
+          "duration": 0,
+          "enabled": true
+        },
+        {
+          "id": "ID1002",
+          "cueId": "cue2",
+          "frame": 10,
+          "lane": "V2",
+          "duration": 0,
+          "enabled": true
+        },
+        {
+          "id": "ID1003",
+          "cueId": "cue1",
+          "frame": 20,
+          "lane": "V3",
+          "duration": 30,
+          "enabled": true
+        },
+        {
+          "id": "ID1004",
+          "cueId": "cue2",
+          "frame": 25,
+          "lane": "V2",
+          "duration": 0,
+          "enabled": true
+        },
+        {
+          "id": "ID1005",
+          "cueId": "cue4",
+          "frame": 30,
+          "lane": "V1",
+          "duration": 0,
+          "enabled": true
+        },
+        {
+          "id": "ID1006",
+          "cueId": "cue3",
+          "frame": 35,
+          "lane": "R1",
+          "duration": 12,
+          "enabled": true
+        },
+        {
+          "id": "ID1007",
+          "cueId": "cue5",
+          "frame": 40,
+          "lane": "V1",
+          "duration": 0,
+          "enabled": true
+        },
+        {
+          "id": "ID1008",
+          "cueId": "cue6",
+          "frame": 45,
+          "lane": "V2",
+          "duration": 0,
+          "enabled": true
+        }
+      ]
+    }
+  ]
+}

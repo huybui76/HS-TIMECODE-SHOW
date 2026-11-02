@@ -82,6 +82,18 @@
     </div>
   </header>
 
+  <div id="tlCtx" hidden>
+    <button data-c="note">✏ <span>Sửa ghi chú…</span></button>
+    <button data-c="smpte">⏱ <span>SMPTE Input</span></button>
+    <button data-c="hide">👁 <span>Ẩn clip (không gửi OSC)</span></button>
+    <div class="sep"></div>
+    <button data-c="copy">⌘ <span>Sao chép</span></button>
+    <button data-c="cut">✂ <span>Cắt</span></button>
+    <button data-c="paste">📋 <span>Dán vào đây</span></button>
+    <div class="sep"></div>
+    <button data-c="del" class="danger">🗑 <span>Xóa</span></button>
+  </div>
+
   <main>
     <aside id="cuePanel">
       <div class="panel-head">
@@ -142,6 +154,10 @@
       </div>
       <div id="tlHeader">
         <span class="tl-title">TIMELINE — <span id="tlSongName">Chính</span></span>
+        <span class="tl-tools">
+          <button id="toolSelect" class="tlt on" title="Chọn — thao tác thường (phím T)">➤ Chọn</button>
+          <button id="toolCut" class="tlt" title="Kéo: click vào clip cue để cắt — phần phía sau vết cắt sẽ bị xóa (C)">✂ Cắt</button>
+        </span>
         <button id="btnLaneV" title="Thêm lane V (video cue — kéo cue vào)">＋ V</button>
         <button id="btnLaneA" title="Thêm lane A (audio — kéo bài hát vào đây)">＋ A</button>
         <button id="btnLaneR" title="Thêm lane R (ghi OSC từ Resolume)">＋ R</button>
@@ -158,7 +174,7 @@
           ⇔ RỘNG <input type="range" id="ppsRange" min="0" max="100" value="50">
         </label>
         <label class="inline small zoomer" title="Độ cao lane — kéo để cao/thấp toàn bộ layer dọc">
-          ⇕ CAO <input type="range" id="rowHRange" min="24" max="96" value="38">
+          ⇕ CAO <input type="range" id="rowHRange" min="24" max="96" value="60">
         </label>
         <span class="spacer"></span>
         <span id="tlStats" class="hint">0 cue · 0 lane</span>
@@ -238,6 +254,12 @@
         <span id="audioName">chưa chọn nhạc — kéo bài từ danh sách NHÁC vào timeline</span>
         <span class="spacer"></span>
         <label class="inline">🔊<input type="range" id="vol" min="0" max="1" step="0.01" value="0.9"></label>
+        <label class="inline" title="Hành vi khi phát hết nội dung: chạy vô hạn (chỉ dừng khi bấm ⏹) hay tự dừng ở cuối nội dung + 10 giây">Hết phát
+          <select id="playEndSel">
+            <option value="infinite">chạy vô hạn</option>
+            <option value="contentEndPlus10">cuối nội dung +10s</option>
+          </select>
+        </label>
         <label class="inline" title="Khi hết bài, tự chuyển sang bài kế tiếp trong danh sách"><input type="checkbox" id="autoAdvChk" checked> Tự chuyển bài</label>
         <label class="inline"><input type="checkbox" id="followChk" checked> Theo thanh đò</label>
         <span class="zoom">

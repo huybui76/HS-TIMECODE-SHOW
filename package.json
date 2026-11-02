@@ -35,6 +35,7 @@
       "target": [
         "dir"
       ],
+      "icon": "build/icon.png",
       "category": "public.app-category.music"
     }
   }

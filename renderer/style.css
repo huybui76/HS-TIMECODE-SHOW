@@ -106,6 +106,26 @@ body {
 .menu-drop .sc { color: #6f6f7c; font-size: 11px; }
 .menu-sep { height: 1px; background: #2c2c36; margin: 5px 6px; }
 
+/* ===== Menu chuột phải trên timeline (kiểu Resolume) ===== */
+#tlCtx {
+  position: fixed; z-index: 900; min-width: 235px;
+  background: #1b1b22; border: 1px solid #3a3a46;
+  border-radius: 10px; padding: 6px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, .66);
+}
+#tlCtx button {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  background: none; border: none; text-align: left;
+  color: #e2e2ea; font-size: 13px; padding: 8px 10px 8px 12px; border-radius: 6px;
+}
+#tlCtx button span { flex: 1; font-weight: 600; }
+#tlCtx button:hover { background: #2b4079; color: #fff; }
+#tlCtx button.danger, #tlCtx button.danger:hover { color: #ff6b6b; font-weight: 700; }
+#tlCtx button.danger:hover { background: rgba(255, 80, 80, 0.14); }
+#tlCtx button.disabled, #tlCtx button.disabled:hover { color: #6f6f7c; cursor: default; background: none; }
+#tlCtx .sep { height: 1px; background: #2c2c36; margin: 5px 8px; }
+#tlCtx button.on span::after { content: "  ✓"; color: #4f8cff; font-weight: 800; }
+
 /* SelBar — thao tác vùng chọn trên timeline */
 .selbar { display: none; align-items: center; gap: 5px; margin-left: 8px; }
 .selbar button { padding: 3px 8px; font-size: 11.5px; }
@@ -449,6 +469,14 @@ button.hidebtn:disabled { opacity: .45; }
 }
 .tl-title { font-size: 12px; font-weight: 700; letter-spacing: 1px; color: #cfcfda; margin-right: 6px; }
 #tlStats { margin-left: auto; }
+
+/* Công cụ chuột trên timeline: Chọn (➤) / Cắt (✂) */
+.tl-tools { display: inline-flex; gap: 4px; margin-left: 10px; }
+.tlt { padding: 4px 10px; font-size: 12px; white-space: nowrap; }
+.tlt.on {
+  background: #2b4079; color: #fff; font-weight: 700;
+  border-color: #4f8cff; box-shadow: 0 0 0 1px rgba(79, 140, 255, .35) inset;
+}
 
 #midiRecBar {
   display: flex; align-items: center; gap: 8px;
