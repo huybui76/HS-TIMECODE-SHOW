@@ -13,7 +13,8 @@ const state = {
   activeFolderId: null,    // thư mục nhận cue khi ghi
   lanes: [],               // [{id, name:'V1'|'A1'|'R1', kind:'V'|'A'|'R'}] — thứ tự trên timeline (V trên, A giữa, R dưới)
   audioClips: [],          // INSTANCE nhạc trên timeline (không giới hạn, cùng 1 file vẫn mỗi lần thả 1 instance riêng):
-                           // [{id, songId=sourceId, laneId, tlStart, tlEnd qua srcEnd, srcStart, srcEnd}] — toàn bộ GIÂY
+                           // [{id=instanceId, songId=sourceId, laneId=trackId, tlStart=timelineStart, srcStart=sourceStart,
+                           //   srcEnd=sourceEnd (tlEnd = tlStart + srcEnd − srcStart), volume, fadeIn, fadeOut}] — toàn bộ GIÂY
   selClipId: null,         // instance clip nhạc đang chọn trên timeline
   recLaneId: null,         // lane R nhận cue khi ghi
   songs: [],               // [{id, name, path, duration, size, peaks, decoding}]
@@ -59,6 +60,7 @@ const canvas = $('timeline');
 const ctx = canvas.getContext('2d');
 let audioCtx = null;
 let audioSongId = null;   // id bài đang phát trên element <audio> (theo clip, không theo mốc)
+let masterVol = 0.9;      // âm lượng tổng (thanh 🔊) — nhân với volume RIÊNG của từng instance clip khi phát
 let rxLocal = 0;
 let flat = [];             // [{t, ev, folder}] — cue đóng gói theo OFFSET, sắp tăng dần
 
@@ -597,6 +599,9 @@ function openFolderPalette(f, anchor) {
 
 /* ================= Kho nhạc ================= */
 function addSongFile(path) {
+  // cùng file = CÙNG SOURCE (Media/NHÁC không trùng entry — như CapCut); instance mới sẽ trỏ vào đây
+  const existing = state.songs.find((s) => s.path === path);
+  if (existing) return existing;
   const song = {
     id: nid(),
     name: path.split('/').pop().replace(/\.[^.]+$/, ''),
@@ -626,7 +631,11 @@ function removeSong(id) {
   state.lanes.forEach((l) => {
     if (l.songId === song.id) { l.songId = null; l.songOffset = 0; l.songEnd = 0; }
   });
-  if (state.selAudioLaneId && !(laneById(state.selAudioLaneId) || {}).songId) state.selAudioLaneId = null;
+  // xóa mọi INSTANCE đang dùng source này (source hết → instance mồ côi phải đi theo;
+  // các instance dùng source KHÁC hoàn toàn không đụng tới)
+  state.audioClips = state.audioClips.filter((c) => c.songId !== song.id);
+  if (state.selClipId && !audioClipById(state.selClipId)) state.selClipId = null;
+  if (state.clipboardAudio && state.clipboardAudio.songId === song.id) state.clipboardAudio = null;
   // dừng hẳn âm thanh đang phát của bài vừa xóa — không để tiếng vẫn vang
   pause();
   if (audioSongId === song.id) audioSongId = null;
@@ -637,12 +646,15 @@ function removeSong(id) {
   scheduleAutosave();
 }
 
-function activateSong(i, autoplay = false) {
+function activateSong(i, autoplay = false, keepView = false) {
+  const changed = i !== state.songIndex;   // thả THÊM instance cùng bài không nhảy playhead/zoom
   state.songIndex = i;
   const song = curSong();
-  state.frame = 0;
-  state.ppsInit = false;
-  state.viewStart = 0;
+  if (changed && !keepView) {
+    state.frame = 0;
+    state.ppsInit = false;
+    state.viewStart = 0;
+  }
   if (song && song.path) {
     audio.src = 'file://' + encodeURI(song.path);
     audio.playbackRate = state.speed;
@@ -816,6 +828,7 @@ function decodeWaveform(song) {
       song.peaks = buildPeakLODs(ch0, ch1, audioBuf.sampleRate);
       if (!song.duration) song.duration = audioBuf.duration;
       song.decoding = false;
+      refreshClipBounds(song);   // biết duration rồi → dựng srcEnd đúng cho instance đã thả trước đó
       renderSongs();
       updateAudioName();
       drawTimeline();
@@ -851,10 +864,10 @@ function setupDrop(zone, activate) {
     files.filter((f) => exts.test(f.name)).forEach((f) => {
       const p = window.hs.filePath(f);
       if (!p) return;
-      addSongFile(p);
+      const song = addSongFile(p);   // trùng path → dùng lại source cũ, không thêm entry mới
       if (activate && first) {
-        activateSong(state.songs.length - 1);
-        if (zone.__onSongDrop) zone.__onSongDrop(state.songs[state.songs.length - 1].id, e);
+        activateSong(state.songs.indexOf(song));
+        if (zone.__onSongDrop) zone.__onSongDrop(song.id, e);
         first = false;
       }
     });
@@ -867,6 +880,7 @@ function setupDrop(zone, activate) {
 /* Clip instance đang chứa playhead (lane A bất kỳ) — nguồn phát thật của engine */
 function findClipAtFrame(fr) {
   const sec = fr / state.fps;
+  let best = null, bestSong = null;
   for (const c of state.audioClips) {
     const lane = laneById(c.laneId);
     if (!lane || lane.locked) continue;
@@ -874,10 +888,12 @@ function findClipAtFrame(fr) {
     if (!song || !song.duration) continue;
     const len = clipLen(c) || song.duration;
     if (sec >= c.tlStart && sec < c.tlStart + len - 0.01) {
-      return { song, clip: c, tlStart: c.tlStart, srcStart: c.srcStart, tlEnd: c.tlStart + len };
+      // chồng nhau: instance đặt SAU (tlStart lớn hơn) đè instance trước — như CapCut
+      if (!best || c.tlStart > best.tlStart) { best = c; bestSong = song; }
     }
   }
-  return null;
+  if (!best) return null;
+  return { song: bestSong, clip: best, tlStart: best.tlStart, srcStart: best.srcStart, tlEnd: best.tlStart + (clipLen(best) || bestSong.duration) };
 }
 
 function contentEndSeconds() {
@@ -1030,6 +1046,7 @@ function onOscMessage(msg) {
     const def = findOrMakeDef(f, msg.address, msg.args);
     const cue = makePlacement(Math.floor(state.frame) - f.offset, def.id);
     cue.lane = rl ? rl.name : 'V1';
+    state.selClipId = null;
     insertCue(f, cue);
     refreshAll();
     flashStatus(`Đã ghi cue @ ${tcString(state.frame, state.fps)} → ${f.name}/${cue.lane}  ${msg.address}`);
@@ -1046,6 +1063,7 @@ function cueFromOsc(address, args) {
   cue.lane = rl ? rl.name : 'V1';
   insertCue(f, cue);
   state.sel = cue;
+  state.selClipId = null;
   refreshAll();
   renderProps();
   flashStatus(`Đã thêm cue từ ${address} @ ${tcString(state.frame, state.fps)}`);
@@ -1246,11 +1264,21 @@ function drawTimeline() {
     clipsInLane(r.id).forEach((c) => {
       const song = clipSong(c);
       if (!song || !song.path) return;
-      // độ dài segment từ SOURCE (srcEnd − srcStart); chưa decode xong → tạm 2 phút
+      // độ dài segment từ SOURCE (srcEnd − srcStart); chưa decode xong → vẽ khung mờ chờ
       let len = clipLen(c);
       if (len <= 0) len = song.duration > 0 ? song.duration : (song.decoding ? 0 : 120);
-      if (len <= 0) return;
       const cx1 = (c.tlStart - state.viewStart) * state.pps + GUT;
+      if (len <= 0) {
+        // chưa biết duration (đang decode) → vẽ KHUNG MỜ + dòng chữ, instance không được "vô hình"
+        ctx.strokeStyle = '#2a5a4f';
+        ctx.setLineDash([4, 3]);
+        ctx.strokeRect(cx1 + .5, r.y + 1.5, 90, r.h - 9);
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#4a7a6d';
+        ctx.font = '11px -apple-system, sans-serif';
+        ctx.fillText('đang phân tích sóng…', cx1 + 8, r.y + (r.h - 6) / 2);
+        return;
+      }
       const cx2 = (c.tlStart + len - state.viewStart) * state.pps + GUT;
       const bx1 = Math.max(cx1, GUT), bx2 = Math.min(cx2, W);
       if (bx2 <= bx1) return;
@@ -1393,7 +1421,12 @@ let mousePos = { x: -1, y: -1 };
        KHÔNG stretch, KHÔNG đổi pitch — chỉ đổi dài hơn giữa nguồn.
    • ml: instance fields (giây) — tlStart (trên timeline), srcStart/srcEnd (trong bài gốc). */
 function makeAudioClip(songId, laneId, tlStart, srcStart, srcEnd) {
-  return { id: 'au' + nid(), songId, laneId, tlStart: Math.max(0, tlStart), srcStart: Math.max(0, srcStart), srcEnd: Math.max(0, srcEnd) };
+  return {
+    id: 'au' + nid(),          // instanceId — MỖI instance một id riêng, không bao giờ trùng dù cùng sourceId
+    songId, laneId,
+    tlStart: Math.max(0, tlStart), srcStart: Math.max(0, srcStart), srcEnd: Math.max(0, srcEnd),
+    volume: 1, fadeIn: 0, fadeOut: 0   // thuộc tính RIÊNG từng instance (độc lập giữa các instance cùng source)
+  };
 }
 function clipLen(clip) { return Math.max(0, (clip.srcEnd || 0) - (clip.srcStart || 0)); }          // độ dài segment (giây)
 function clipSong(clip) { return state.songs.find((s) => s.id === clip.songId) || null; }
@@ -1401,12 +1434,45 @@ function clipsInLane(laneId) {
   return state.audioClips.filter((c) => c.laneId === laneId).sort((a, b) => a.tlStart - b.tlStart);
 }
 function audioClipById(id) { return state.audioClips.find((c) => c.id === id) || null; }
+function selAudioClip() { return state.selClipId ? audioClipById(state.selClipId) : null; }
 function removeAudioClip(id) {
   const i = state.audioClips.findIndex((c) => c.id === id);
   if (i < 0) return false;
   state.audioClips.splice(i, 1);
   if (state.selClipId === id) state.selClipId = null;
   return true;
+}
+
+/* Đặt INSTANCE mới lên lane A (CapCut): mỗi lần thả = 1 instance riêng dù cùng source.
+   srcEnd = 0 khi duration chưa decode xong — refreshClipBounds sẽ dựng đúng khi biết duration. */
+function addAudioInstance(song, laneId, atSec) {
+  const dur = song && song.duration > 0 ? song.duration : 0;
+  const clip = makeAudioClip(song.id, laneId, atSec, 0, dur);
+  state.audioClips.push(clip);
+  refreshClipBounds(song);
+  refreshAll();
+  return clip;
+}
+
+/* Chuẩn hóa range MỌI instance của bài này khi biết/đổi duration: instance full-length (srcEnd=0)
+   → phủ cả bài; srcEnd vượt duration → kẹp về đúng giới hạn source (không kéo quá nguồn). */
+function refreshClipBounds(song) {
+  if (!song || !(song.duration > 0)) return;
+  state.audioClips.forEach((c) => {
+    if (c.songId !== song.id) return;
+    if (!(c.srcEnd > 0)) c.srcEnd = song.duration;
+    else if (c.srcEnd > song.duration) c.srcEnd = song.duration;
+    if (c.srcStart > c.srcEnd) c.srcStart = Math.max(0, c.srcEnd - 0.06);
+  });
+  infoDirty = true;
+}
+
+/* Fade in/out tuyến tính theo vị trí trong SOURCE (giây) — áp RIÊNG từng instance khi phát */
+function fadeFactor(c, localSec) {
+  let f = 1;
+  if (c.fadeIn > 0) f = Math.min(f, clamp((localSec - c.srcStart) / c.fadeIn, 0, 1));
+  if (c.fadeOut > 0) f = Math.min(f, clamp((c.srcEnd - localSec) / c.fadeOut, 0, 1));
+  return f;
 }
 
 function setTlTool(mode) {
@@ -1672,6 +1738,7 @@ canvas.addEventListener('mouseup', (e) => {
   if (sbDrag) { sbDrag = null; canvas.style.cursor = 'crosshair'; return; }
   if (clipDrag) {
     if (clipDrag.moved) {
+      noteChange();       // kéo dời/trim instance phải hoàn tác được (undo)
       scheduleAutosave();
       const c = clipDrag.clip;
       flashStatus(clipDrag.mode === 'move'
@@ -1724,6 +1791,7 @@ canvas.addEventListener('mouseup', (e) => {
     } else if (!blockDrag.moved) {
       // click chọn cue (⌘/Ctrl = thêm/bỏ khỏi vùng chọn)
       state.selAudioLaneId = null;
+      state.selClipId = null;   // chọn cue = bỏ chọn instance clip (selbar không hiện nhầm)
       if (e.metaKey || e.ctrlKey) {
         if (state.multiSel.has(ev)) state.multiSel.delete(ev);
         else state.multiSel.add(ev);
@@ -1747,9 +1815,10 @@ canvas.addEventListener('mouseup', (e) => {
   if (dragInfo.mode === 'scrub') { dragInfo = null; return; }
   if (!dragInfo.moved && x >= GUT) {
     const row = hitLaneRow(y);
-    if (row && row.isAudio && row.songId) {
-      // click nền lane A (ngoài clip) → bỏ chọn
+    if (row && row.isAudio) {
+      // click nền lane A (ngoài clip) → bỏ chọn clip/lane
       state.selAudioLaneId = null;
+      state.selClipId = null;
       updateSelBar();
     } else {
       state.sel = null;
@@ -1763,12 +1832,12 @@ canvas.addEventListener('mouseup', (e) => {
   dragInfo = null;
 });
 
-// nhấp đúp clip nhạc → lấy bài đó làm mốc thời gian (đồng hồ show)
+// nhấp đúp clip nhạc → lấy bài SOURCE đó làm mốc thời gian (đồng hồ show) — không đụng instance
 canvas.addEventListener('dblclick', (e) => {
   const r = canvas.getBoundingClientRect();
   const clip = audioClipHit(e.clientX - r.left, e.clientY - r.top);
-  if (clip) {
-    const si = state.songs.findIndex((s) => s.id === clip.row.songId);
+  if (clip && clip.song) {
+    const si = state.songs.findIndex((s) => s.id === clip.song.id);
     if (si >= 0) { activateSong(si); flashStatus(`Đã lấy "${state.songs[si].name}" làm mốc thời gian.`); }
   }
 });
@@ -1816,11 +1885,14 @@ canvas.addEventListener('contextmenu', (e) => {
     state.sel = hit.fx.ev;
     state.multiSel = new Set([hit.fx.ev]);
     state.selAudioLaneId = null;
+    state.selClipId = null;
     renderProps(); updateSelBar(); renderFolders();
     tlCtxTarget = { type: 'cue', ev: hit.fx.ev };
   } else if (clip) {
+    state.selClipId = clip.clip.id;      // chọn đúng INSTANCE (menu Sao chép/Cắt/Dán/Xóa theo instance)
     state.selAudioLaneId = clip.laneObj.id;
     state.sel = null;
+    state.multiSel = new Set();
     renderProps(); updateSelBar(); renderFolders();
     tlCtxTarget = { type: 'audio', clip };
   } else {
@@ -1883,35 +1955,23 @@ canvas.addEventListener('wheel', (e) => {
   // 2 ngón đẩy LÊN/XUỒNG → KHÔNG làm gì (không tự zoom)
 }, { passive: false });
 
-/* Thả vào timeline: bài hát (gắn vào lane A, clip bắt đầu tại điểm thả) hoặc cue (đặt thời điểm + lane) */
-setupDrop(canvas, false);
-canvas.__onSongDrop = (songId, e) => {
-  const r = canvas.getBoundingClientRect();
-  const x = e.clientX - r.left;
-  const row = hitLaneRow(e.clientY - r.top);
-  if (row && row.isAudio) {
-    row.songId = songId; // gắn bài vào đúng lane A bị thả
-    const lane = laneById(row.id);
-    if (lane) {
-      lane.songId = songId;
-      lane.songOffset = Math.max(0, state.viewStart + (x - GUT) / state.pps); // clip bắt đầu tại chỗ thả
-    }
-    scheduleAutosave();
-  }
-};
+/* Thả vào timeline (CapCut): BÀI HÁT → INSTANCE MỚI trên lane A (cùng source, instanceId riêng — thả
+   bao nhiêu lần cũng được, KHÔNG thay thế instance cũ); CUE GỐC → điểm đặt mới; FILE từ Finder →
+   thêm source vào NHÁC + đặt instance tại chỗ thả. Canvas tự quản drop (không qua setupDrop). */
+canvas.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); });
 canvas.addEventListener('drop', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
   const r = canvas.getBoundingClientRect();
   const x = e.clientX - r.left, y = e.clientY - r.top;
+  const row = hitLaneRow(y);
   const cid = e.dataTransfer.getData('text/hs-cue');
   const sid = e.dataTransfer.getData('text/hs-song');
   if (cid && !sid) {
-    e.preventDefault();
-    e.stopPropagation();
     const [fid, defId] = cid.split(':').map(Number);
     const f = state.folders.find((fo) => fo.id === fid);
     const def = f && f.cues.find((c) => c.id === defId);
     if (def && f) {
-      const row = hitLaneRow(y);
       if (row && laneLockedByName(row.lane)) { flashStatus(`Lane ${row.lane} đang khóa — mở khóa để đặt cue.`); return; }
       // thả cue gốc vào timeline = ĐIỂM ĐẶT mới, mặc định dài 3 giây
       const cue = makePlacement(0, def.id);
@@ -1921,6 +1981,7 @@ canvas.addEventListener('drop', (e) => {
       insertCue(f, cue);
       state.sel = cue;
       state.multiSel = new Set([cue]);
+      state.selClipId = null;
       updateSelBar();
       refreshAll();
       renderProps();
@@ -1929,50 +1990,53 @@ canvas.addEventListener('drop', (e) => {
     return;
   }
   if (sid) {
-    e.preventDefault();
+    // thả bài từ danh sách NHÁC vào lane A = INSTANCE MỚI tham chiếu source (songId) — không đụng instance cũ
     const i = state.songs.findIndex((s) => s.id === Number(sid));
-    if (i >= 0) {
-      const row = hitLaneRow(y);
-      if (row && row.isAudio) {
-        row.songId = state.songs[i].id;
-        const lane = laneById(row.id);
-        if (lane) {
-          lane.songId = state.songs[i].id;
-          lane.songOffset = Math.max(0, state.viewStart + (x - GUT) / state.pps);
-        }
-        scheduleAutosave();
-        flashStatus(`Đã gắn "${state.songs[i].name}" vào lane ${row.lane}`);
-      }
-    }
+    if (i < 0) return;
+    const song = state.songs[i];
+    if (!(row && row.isAudio)) { flashStatus('Thả bài vào lane A (lane nhạc) để tạo instance.'); return; }
+    if (laneLockedByName(row.lane)) { flashStatus(`Lane ${row.lane} đang khóa — mở khóa để thả.`); return; }
+    const at = Math.max(0, state.viewStart + (x - GUT) / state.pps);   // tính TRƯỚC khi đụng view
+    activateSong(i, false, true);   // giữ nguyên playhead/zoom/vùng nhìn — thả không được làm view nhảy
+    const clip = addAudioInstance(song, row.id, at);
+    state.selClipId = clip.id;
+    state.selAudioLaneId = row.id;
+    state.sel = null;
+    state.multiSel = new Set();
+    updateSelBar();
+    const n = state.audioClips.filter((c) => c.songId === song.id).length;
+    flashStatus(`Instance #${n} của "${song.name}" @ ${tcString(Math.round(at * state.fps), state.fps)} — thả cùng bài lần nữa vẫn tạo instance mới.`);
     return;
   }
   const files = [...e.dataTransfer.files];
-  if (files.length) {
-    e.preventDefault();
-    const row = hitLaneRow(y);
-    const exts = /\.(mp3|wav|aiff|aif|m4a|aac|flac|ogg)$/i;
-    const audioFiles = files.filter((f) => exts.test(f.name));
-    if (audioFiles.length && row && row.isAudio) {
-      let first = true;
-      audioFiles.forEach((f) => {
-        const p = window.hs.filePath(f);
-        if (!p) return;
-        addSongFile(p);
-        if (first) {
-          const si = state.songs.length - 1;
-          row.songId = state.songs[si].id;
-          const lane = laneById(row.id);
-          if (lane) lane.songId = state.songs[si].id;
-          activateSong(si);
-          first = false;
-        }
-      });
-      scheduleAutosave();
-      setStatus(`Đã thêm ${audioFiles.length} bài vào lane ${row.lane}.`);
-      return;
-    }
+  if (!files.length) return;
+  const exts = /\.(mp3|wav|aiff|aif|m4a|aac|flac|ogg)$/i;
+  const audioFiles = files.filter((f) => exts.test(f.name));
+  if (audioFiles.length && row && row.isAudio) {
+    // FILE thả TRỰC TIẾP lên lane A: thêm source vào NHÁC (một lần) + đặt INSTANCE tại chỗ thả
+    if (laneLockedByName(row.lane)) { flashStatus(`Lane ${row.lane} đang khóa — mở khóa để thả.`); return; }
+    let first = true;
+    audioFiles.forEach((f) => {
+      const p = window.hs.filePath(f);
+      if (!p) return;
+      const song = addSongFile(p);   // trùng path → dùng lại source cũ
+      if (first) {
+        const at = Math.max(0, state.viewStart + (x - GUT) / state.pps);
+        activateSong(state.songs.indexOf(song), false, true);   // giữ view — không reset khi thả
+        const clip = addAudioInstance(song, row.id, at);
+        state.selClipId = clip.id;
+        state.selAudioLaneId = row.id;
+        first = false;
+      }
+    });
+    updateSelBar();
+    setStatus(`Đã thêm ${audioFiles.length} bài — instance đặt trên lane ${row.lane}.`);
+  } else if (audioFiles.length) {
+    // thả file lên vùng khác (lane V/R, nền) → chỉ thêm vào danh sách NHÁC, chưa đặt lên timeline
+    audioFiles.forEach((f) => { const p = window.hs.filePath(f); if (p) addSongFile(p); });
+    setStatus(`Đã thêm ${audioFiles.length} bài vào danh sách NHÁC — kéo vào lane A để đặt instance.`);
   }
-}, true); // chặn trước handler của setupDrop
+});
 
 /* Vẽ khối cue đang kéo (ghost) — ghép vào cuối drawTimeline qua hook */
 const _drawTimeline = drawTimeline;
@@ -2034,11 +2098,15 @@ function tick(t) {
         audio.currentTime = clamp(local, 0, Math.max(0, clip.song.duration - 0.02));
       }
       if (audio.paused) audio.play().catch(() => {});
+      // ÂM LƯỢNG theo INSTANCE: tổng (🔊) × volume riêng của clip × fade in/out — mỗi instance độc lập
+      const vol = clamp(masterVol * (typeof clip.clip.volume === 'number' ? clip.clip.volume : 1) * fadeFactor(clip.clip, local), 0, 1);
+      if (Math.abs(audio.volume - vol) > 0.01) audio.volume = vol;
       // playhead bám theo fireplace thật — tính từ tlStart trừ đi srcStart (tiết kiệm mapping)
       state.frame = (clip.tlStart - clip.srcStart + audio.currentTime) * state.fps;
     } else {
       // ngoài clip (hoặc clip đã chạy tới điểm cắt srcEnd): im tiếng ngay, playhead vẫn chạy
       if (!audio.paused) audio.pause();
+      if (Math.abs(audio.volume - masterVol) > 0.01) audio.volume = masterVol;
       if (lastT != null) state.frame += ((t - lastT) / 1000) * state.fps * state.speed;
     }
     fireDue();
@@ -2079,16 +2147,13 @@ function updateInfoStrip() {
     $('infoNext').textContent = '--:--:--:--';
     $('infoNextName').textContent = 'không còn cue nào';
   }
-  // CÒN LẠI = điểm NGOÀI CÙNG của timeline: max(cuối clip nhạc trên lane A, cue cuối cùng)
+  // CÒN LẠI = điểm NGOÀI CÙNG của timeline: max(cuối instance clip nhạc, cue cuối cùng)
   let endFrame = 0;
-  state.lanes.forEach((l) => {
-    if (l.kind !== 'A' || !l.songId) return;
-    const s = state.songs.find((x) => x.id === l.songId);
-    if (s && s.duration > 0) {
-      const len = (l.songEnd > 0) ? Math.min(l.songEnd, s.duration) : s.duration;
-      const end = ((l.songOffset || 0) + len) * state.fps;
-      if (end > endFrame) endFrame = end;
-    }
+  state.audioClips.forEach((c) => {
+    const song = clipSong(c);
+    const len = clipLen(c) || (song ? song.duration : 0) || 0;
+    const end = (c.tlStart + len) * state.fps;
+    if (end > endFrame) endFrame = end;
   });
   const f = curFolder();
   const pool = (state.showAllFolders || !f) ? flat : flat.filter((x) => x.f === f);
@@ -2106,6 +2171,7 @@ audio.addEventListener('loadedmetadata', () => {
   const s = curSong();
   if (s && audio.duration && Math.abs((s.duration || 0) - audio.duration) > 0.5) {
     s.duration = audio.duration;
+    refreshClipBounds(s);
     renderSongs();
     updateAudioName();
     scheduleAutosave();
@@ -2411,7 +2477,10 @@ $('fpsSel').addEventListener('change', (e) => {
   scheduleAutosave();
 });
 $('followChk').addEventListener('change', (e) => { state.follow = e.target.checked; });
-$('vol').addEventListener('input', (e) => { audio.volume = parseFloat(e.target.value); });
+$('vol').addEventListener('input', (e) => {
+  masterVol = parseFloat(e.target.value);
+  audio.volume = masterVol;   // khi đang phát clip, tick() sẽ nhân thêm volume/fade riêng của instance
+});
 
 $('btnAddCue').addEventListener('click', () => {
   let f = curFolder();
@@ -2436,9 +2505,9 @@ function selSet() {
 
 function updateSelBar() {
   const n = selSet().size;
-  const audio = state.selAudioLaneId ? 1 : 0;
-  $('selCount').textContent = audio ? '1 clip nhạc' : `${n} đã chọn`;
-  $('selBar').style.display = (n || audio) ? 'flex' : 'none';
+  const hasAudio = !!selAudioClip();
+  $('selCount').textContent = hasAudio ? '1 clip nhạc' : `${n} đã chọn`;
+  $('selBar').style.display = (n || hasAudio) ? 'flex' : 'none';
 }
 
 function selAudioLane() {
@@ -2454,12 +2523,14 @@ function findCueLoc(ev) {
 }
 
 function copySelection() {
-  // clip nhạc trên lane A
-  const al = selAudioLane();
-  if (al) {
-    if (!al.songId) { setStatus('Lane này chưa gắn nhạc.'); return false; }
-    state.clipboardAudio = { songId: al.songId, offset: al.songOffset || 0, songEnd: al.songEnd > 0 ? al.songEnd : 0 };
-    flashStatus('Đã sao chép clip nhạc.');
+  // INSTANCE clip nhạc đang chọn — sao chép SEGMENT (tham chiếu source, không copy file)
+  const c = selAudioClip();
+  if (c) {
+    state.clipboardAudio = {
+      songId: c.songId, srcStart: c.srcStart, srcEnd: c.srcEnd,
+      volume: typeof c.volume === 'number' ? c.volume : 1, fadeIn: c.fadeIn || 0, fadeOut: c.fadeOut || 0
+    };
+    flashStatus('Đã sao chép clip nhạc (segment — tham chiếu source gốc).');
     return true;
   }
   const set = selSet();
@@ -2473,16 +2544,15 @@ function copySelection() {
 }
 
 function cutSelection() {
-  const al = selAudioLane();
-  if (al) {
+  const c = selAudioClip();
+  if (c) {
     if (!copySelection()) return;
-    al.songId = null;
-    al.songOffset = 0; al.songEnd = 0;
+    removeAudioClip(c.id);
     state.selAudioLaneId = null;
     refreshAll();
     renderProps();
     updateSelBar();
-    flashStatus('Đã cắt clip nhạc — Dán để đặt lại tại thanh đò.');
+    flashStatus('Đã cắt clip nhạc — Dán sẽ tạo INSTANCE MỚI tại playhead.');
     return;
   }
   if (!copySelection()) return;
@@ -2491,16 +2561,15 @@ function cutSelection() {
 }
 
 function deleteSelection(notify = true) {
-  // xóa clip nhạc đang chọn (gỡ khỏi lane, bài vẫn còn trong danh sách NHÁC)
-  const al = selAudioLane();
-  if (al) {
-    al.songId = null;
-    al.songOffset = 0; al.songEnd = 0;
+  // xóa INSTANCE clip đang chọn — source vẫn còn nguyên trong danh sách NHÁC, instance khác không đổi
+  const c = selAudioClip();
+  if (c) {
+    removeAudioClip(c.id);
     state.selAudioLaneId = null;
     refreshAll();
     renderProps();
     updateSelBar();
-    if (notify) flashStatus('Đã gỡ clip nhạc khỏi lane.');
+    if (notify) flashStatus('Đã xóa instance clip — source vẫn còn trong danh sách NHÁC.');
     return;
   }
   const set = selSet();
@@ -2518,18 +2587,26 @@ function deleteSelection(notify = true) {
 }
 
 function pasteSelection(atFrame) {
-  // dán clip nhạc: vào lane A đang chọn (hoặc lane A trống đầu tiên) tại thanh đò
+  // dán clip nhạc = INSTANCE MỚI từ segment đã sao chép (không thay thế instance nào)
   if (state.clipboardAudio && !selSet().size) {
-    let lane = selAudioLane() || state.lanes.find((l) => l.kind === 'A' && !l.locked && !l.songId);
-    if (!lane) lane = state.lanes.find((l) => l.kind === 'A' && !l.locked);
+    const song = state.songs.find((s) => s.id === state.clipboardAudio.songId);
+    if (!song) { setStatus('Bài nguồn đã bị xóa khỏi danh sách NHÁC.'); state.clipboardAudio = null; return; }
+    let lane = selAudioLane();
+    if (!lane || lane.kind !== 'A' || lane.locked) lane = state.lanes.find((l) => l.kind === 'A' && !l.locked);
     if (!lane) { setStatus('Chưa có lane A — bấm ＋ A trên timeline.'); return; }
-    const at = atFrame !== undefined ? atFrame : state.frame;   // "Dán vào đây" = vị trí chuột phải
-    lane.songId = state.clipboardAudio.songId;
-    lane.songOffset = Math.max(0, at / state.fps);
-    lane.songEnd = state.clipboardAudio.songEnd > 0 ? state.clipboardAudio.songEnd : 0;
-    const song = state.songs.find((s) => s.id === lane.songId);
-    scheduleAutosave();
-    flashStatus(`Đã dán clip "${song ? song.name : '?'}" vào lane ${lane.name} @ ${tcString(at, state.fps)}.`);
+    const at = (atFrame !== undefined ? atFrame : state.frame) / state.fps;   // "Dán vào đây" = vị trí chuột phải
+    const cb = state.clipboardAudio;
+    let srcEnd = cb.srcEnd > 0 ? cb.srcEnd : (song.duration > 0 ? song.duration : 0);
+    if (song.duration > 0 && srcEnd > song.duration) srcEnd = song.duration;
+    const clip = makeAudioClip(song.id, lane.id, at, cb.srcStart, srcEnd);
+    clip.volume = cb.volume; clip.fadeIn = cb.fadeIn; clip.fadeOut = cb.fadeOut;
+    state.audioClips.push(clip);
+    refreshClipBounds(song);
+    state.selClipId = clip.id;
+    state.selAudioLaneId = lane.id;
+    refreshAll();
+    updateSelBar();
+    flashStatus(`Đã dán INSTANCE MỚI "${song.name}" vào lane ${lane.name} @ ${tcString(Math.round(at * state.fps), state.fps)}.`);
     return;
   }
   const items = state.clipboardMulti || (state.clipboard ? [state.clipboard] : null);
@@ -2625,9 +2702,8 @@ $('btnSortSongs').addEventListener('click', () => {
 $('btnAddSong').addEventListener('click', async () => {
   const paths = await window.hs.openAudioMulti();
   if (paths && paths.length) {
-    const firstNew = state.songs.length;
-    paths.forEach((p) => addSongFile(p));
-    if (state.songIndex < 0) activateSong(firstNew);
+    const added = paths.map((p) => addSongFile(p)).filter(Boolean);
+    if (state.songIndex < 0 && added.length) activateSong(state.songs.indexOf(added[0]));
     setStatus(`Đã thêm ${paths.length} bài vào danh sách NHÁC.`);
   }
 });
@@ -3005,14 +3081,16 @@ const undoStack = [], redoStack = [];
 let lastSnap = null;
 
 function snapshot() {
-  return JSON.stringify({ folders: state.folders, lanes: state.lanes });
+  return JSON.stringify({ folders: state.folders, lanes: state.lanes, audioClips: state.audioClips });
 }
 
 function applySnapshot(snap) {
   const d = JSON.parse(snap);
   state.folders = d.folders;
   state.lanes = d.lanes;
+  state.audioClips = Array.isArray(d.audioClips) ? d.audioClips : [];   // undo cả cut/trim/dời instance
   state.sel = null;
+  state.selClipId = null;
   state.multiSel = new Set();
   refreshAll();
   renderProps();
@@ -3061,7 +3139,7 @@ function scheduleAutosave() {
 
 function serializeProject() {
   return {
-    version: 7,
+    version: 8,
     fps: state.fps,
     autoAdvance: state.autoAdvance,
     playbackEndMode: state.playbackEndMode,
@@ -3073,7 +3151,22 @@ function serializeProject() {
     aRowH: state.aRowH,
     pps: state.pps ? +(state.pps.toFixed(3)) : 0,   // Zoom NGANG đang dùng — khôi phục khi mở lại project
     showAllFolders: state.showAllFolders,
-    lanes: state.lanes,
+    // lane A giờ chỉ là "track" vẽ — dữ liệu nhạc sống trong audioClips (mỗi instance một dòng)
+    lanes: state.lanes.map((l) => ({ id: l.id, name: l.name, kind: l.kind, songId: null, songOffset: 0, songEnd: 0, locked: !!l.locked })),
+    // AUDIO INSTANCE (v8): đầy đủ sourceId/instanceId/trackId + range source & timeline — Cut/Trim
+    // chỉ đổi range, Source không bao giờ bị copy hay xóa; Save→Load giữ nguyên mọi segment
+    audioClips: state.audioClips.map((c) => ({
+      instanceId: c.id,          // id riêng của TỪNG instance (không dùng sourceId làm id)
+      sourceId: c.songId,        // bài gốc trong songs[] — nhiều instance chung 1 sourceId
+      trackId: c.laneId,
+      timelineStart: c.tlStart,
+      timelineEnd: c.tlStart + clipLen(c),
+      sourceStart: c.srcStart,
+      sourceEnd: c.srcEnd,
+      volume: typeof c.volume === 'number' ? c.volume : 1,
+      fadeIn: c.fadeIn || 0,
+      fadeOut: c.fadeOut || 0
+    })),
     songs: state.songs.map((s) => ({ id: s.id, name: s.name, path: s.path, duration: s.duration, size: s.size })),
     settings: {
       listenPort: state.listenPort,
@@ -3136,8 +3229,41 @@ function migrateFolder(f) {
   return nf;
 }
 
+/* ===== AUDIO INSTANCE — nạp lại từ file dự án =====
+   • v8+: đọc đúng danh sách audioClips đã lưu (mọi instance + cut/trim range giữ nguyên).
+   • v3–v7 (dự án cũ, nhạc gắn trên lane): mỗi lane A có bài → đúng 1 instance full-range tại songOffset.
+   • Clip mồ côi (sourceId không còn trong songs) bị bỏ — không sinh clip ma. */
+function migrateAudioClips(data, songs, lanes) {
+  const songOk = (id) => songs.some((s) => s.id === id);
+  if (Array.isArray(data.audioClips)) {
+    return data.audioClips.filter((c) => c && songOk(c.sourceId != null ? c.sourceId : c.songId)).map((c) => {
+      const laneId = (c.trackId != null ? c.trackId : c.laneId);
+      const clip = makeAudioClip(
+        c.sourceId != null ? c.sourceId : c.songId,
+        lanes.some((l) => l.id === laneId) ? laneId : lanes[0].id,
+        +(c.timelineStart != null ? c.timelineStart : c.tlStart) || 0,
+        +(c.sourceStart != null ? c.sourceStart : c.srcStart) || 0,
+        +(c.sourceEnd != null ? c.sourceEnd : c.srcEnd) || 0
+      );
+      if (c.instanceId != null || c.id != null) clip.id = String(c.instanceId != null ? c.instanceId : c.id);
+      clip.volume = typeof c.volume === 'number' ? clamp(c.volume, 0, 1) : 1;
+      clip.fadeIn = Math.max(0, +c.fadeIn || 0);
+      clip.fadeOut = Math.max(0, +c.fadeOut || 0);
+      return clip;
+    });
+  }
+  const clips = [];
+  lanes.forEach((l) => {
+    if (l.kind !== 'A' || !l.songId || !songOk(l.songId)) return;
+    const song = songs.find((s) => s.id === l.songId);
+    const end = l.songEnd > 0 ? Math.min(l.songEnd, song.duration || l.songEnd) : (song.duration || 0);
+    clips.push(makeAudioClip(l.songId, l.id, Math.max(0, l.songOffset || 0), 0, end));
+  });
+  return clips;
+}
+
 function applyProject(data) {
-  if (!data || ![3, 4, 5, 6, 7].includes(data.version)) { setStatus('File dự án không hợp lệ.'); return; }
+  if (!data || ![3, 4, 5, 6, 7, 8].includes(data.version)) { setStatus('File dự án không hợp lệ.'); return; }
   pause();
   state.ppsInit = false; // nạp xong tính lại zoom khớp nội dung
   state.fps = data.fps || 30;
@@ -3170,6 +3296,8 @@ function applyProject(data) {
   const pSel = $('playEndSel');
   if (pSel) pSel.value = state.playbackEndMode;
   state.sel = null;
+  state.selClipId = null;
+  state.clipboardAudio = null;
   renderSongs();
   state.activeFolderId = state.folders.some((f) => f.id === data.activeFolderId)
     ? data.activeFolderId : state.folders[0].id;
@@ -3181,6 +3309,14 @@ function applyProject(data) {
     const aLane = state.lanes.find((l) => l.kind === 'A');
     if (aLane && !aLane.songId && state.songs[0]) aLane.songId = state.songs[0].id;
   }
+  // AUDIO INSTANCE: v8 đọc đúng danh sách đã lưu; v≤7 migrate từ lane.songId/songOffset.
+  // Sau đó mọi instance của bài có duration sẵn → chuẩn hóa range (srcEnd=0 → full, vượt → kẹp).
+  state.audioClips = migrateAudioClips(data, state.songs, state.lanes);
+  state.audioClips.forEach((c) => {
+    const m = /^au(\d+)$/.exec(String(c.id));
+    if (m) idSeq = Math.max(idSeq, Number(m[1]));   // id mới không đụng id instance đã có
+  });
+  state.songs.forEach((s) => refreshClipBounds(s));
   // nạp lại waveform các bài
   state.songs.forEach((s) => { if (s.path) { decodeWaveform(s); } });
   const st = data.settings || {};
@@ -3239,6 +3375,9 @@ function newProjectDialog() {
   state.multiSel = new Set();
   state.clipboard = null;
   state.clipboardMulti = null;
+  state.clipboardAudio = null;
+  state.selClipId = null;
+  state.audioClips = [];      // dự án mới = không instance nào (danh sách NHÁC/source cũng rỗng)
   state.frame = 0;
   state.viewStart = 0;
   state.ppsInit = false;
@@ -3278,6 +3417,8 @@ function selectAllCues() {
   state.folders.forEach((f) => f.events.forEach((ev) => set.add(ev)));
   state.multiSel = set;
   state.sel = [...set].slice(-1)[0] || null;
+  state.selClipId = null;
+  state.selAudioLaneId = null;
   renderFolders();
   updateSelBar();
   flashStatus(`Đã chọn ${set.size} cue.`);
@@ -3308,9 +3449,10 @@ function selectAllCues() {
     const saved = localStorage.getItem(AUTOSAVE_KEY);
     if (saved) {
       const data = JSON.parse(saved);
-      if ([3, 4, 5, 6, 7].includes(data.version)) { applyProject(data); restored = true; }
+      if ([3, 4, 5, 6, 7, 8].includes(data.version)) { applyProject(data); restored = true; }
     }
   } catch (_) { /* bỏ qua */ }
   if (!restored) refreshAll();
+  audio.volume = masterVol;
   setStatus('Bật ● REC → gõ MIDI vào Resolume → cue tự ghi vào lane R. Chưa nhận OSC? Bấm "Resolume" trên thanh MIDI REC.');
 })();
