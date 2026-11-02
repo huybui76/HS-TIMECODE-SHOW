@@ -8,13 +8,16 @@
 </head>
 <body>
   <header id="topbar">
-    <div class="brand">HS<span>TIMECODE</span><small>HUY SHOW CONTROL</small></div>
+    <div class="brand"><div class="brand-line">HS<span>TIMECODE</span></div><small>HUY SHOW CONTROL</small></div>
 
     <nav id="menubar">
       <div class="menu"><button class="menu-btn">File</button>
         <div class="menu-drop">
+          <button data-act="new">Dự án mới</button>
+          <div class="menu-sep"></div>
           <button data-act="open">Mở dự án…<span class="sc">⌘O</span></button>
-          <button data-act="save">Lưu dự án<span class="sc">⌘S</span></button>
+          <button data-act="save">Lưu<span class="sc">⌘S</span></button>
+          <button data-act="saveas">Lưu thành…<span class="sc">⇧⌘S</span></button>
         </div>
       </div>
       <div class="menu"><button class="menu-btn">Chỉnh sửa</button>
@@ -89,7 +92,7 @@
       </div>
       <div class="toolbar">
         <button id="btnAddCue" class="primary" title="Thêm cue rỗng tại vị trí thanh đò, vào thư mục đang chọn">＋ Cue</button>
-        <button id="btnAddFolder" title="Thêm thư mục cue (mỗi thư mục có OFFSET riêng)">＋ Thư mục</button>
+        <button id="btnAddFolder" title="Thêm bài timecode mới — timeline trống, riêng biệt với bài trước">＋ Bài</button>
         <span class="spacer"></span>
         <button id="btnDelCue" class="danger" title="Xóa cue đang chọn (Delete)">Xóa</button>
       </div>
@@ -200,7 +203,7 @@
           </div>
           <div class="prow">
             <label>ĐỊA CHỈ OSC</label>
-            <input id="pAddr" class="mono">
+            <input id="pAddr" class="mono" placeholder="/composition/layers/1/clips/1/connect">
           </div>
           <div class="prow">
             <label>THAM SỐ</label>
@@ -224,7 +227,7 @@
           </div>
           <div class="prow">
             <label></label>
-            <label class="radio"><input type="checkbox" id="pEnabled" checked> Bật (gửi khi phát)</label>
+            <button id="pHideBtn" class="hidebtn" title="Làm mờ cue trên timeline (thêm sọc chéo) và KHÔNG gửi OSC khi phát">⊘ ẨN CLIP — KHÔNG GỬI QUA OSC</button>
             <span class="spacer"></span>
             <button id="pDelete" class="danger">Xóa cue</button>
           </div>

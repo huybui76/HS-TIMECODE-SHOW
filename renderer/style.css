@@ -73,7 +73,8 @@ body {
   flex-wrap: nowrap;
 }
 .brand { font-weight: 800; font-size: 17px; letter-spacing: 1px; color: #fff; white-space: nowrap; display: flex; flex-direction: column; line-height: 1.1; }
-.brand span { color: var(--accent); margin-left: 5px; }
+.brand-line { display: flex; flex-direction: row; align-items: baseline; white-space: nowrap; }
+.brand-line span { color: var(--accent); margin-left: 5px; }
 .brand small {
   font-size: 8.5px; font-weight: 700; letter-spacing: 2.5px;
   color: #6f6f7c; margin-top: 2px;
@@ -262,8 +263,10 @@ button.primary:hover { background: #35497a; }
   background: var(--blue); color: #fff; border-radius: 10px;
   font-size: 10px; padding: 1px 8px; min-width: 14px; text-align: center;
 }
-.fdel { border: none; background: none; color: var(--dim); cursor: pointer; font-size: 13px; padding: 2px 4px; }
-.fdel:hover { color: var(--red); background: none; }
+.fdel { border: none; background: none; color: var(--dim); cursor: pointer; font-size: 15px; padding: 2px 5px; }
+.fdel:hover { color: #fff; background: none; }
+.fdel.chev { font-size: 17px; font-weight: 700; color: #9a9aa5; width: 26px; line-height: 1; }
+.folder.active .fdel.chev { color: #cfe0ff; }
 .foffset { display: flex; align-items: center; gap: 8px; padding: 4px 10px 8px; }
 .foffset label { color: var(--dim); font-size: 11px; font-weight: 700; letter-spacing: 1px; }
 .foffset input {
@@ -291,6 +294,9 @@ button.primary:hover { background: #35497a; }
 .cue-row.sel { background: #2b3f6b; }
 .cue-row .tc { font-family: "SF Mono", Menlo, monospace; color: var(--accent); font-size: 11.5px; }
 .cue-row .ln { color: var(--dim); font-size: 10.5px; min-width: 22px; }
+.cue-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.cue-info .cue-name { font-weight: 700; font-size: 12.5px; color: #ececf2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cue-info .cue-addr { font-family: "SF Mono", Menlo, monospace; font-size: 10px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cue-row .ad { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #b9b9c5; }
 .cue-row .cx { border: none; background: none; color: transparent; cursor: pointer; padding: 0 3px; }
 .cue-row:hover .cx { color: var(--dim); }
@@ -413,6 +419,26 @@ button.playnow {
   border-radius: 7px;
 }
 button.playnow:hover { background: #35497a; }
+
+/* Nút ẨN CLIP — to, đổi màu vàng hổ phách khi đang ẩn */
+button.hidebtn {
+  flex: 1;
+  font-weight: 800;
+  letter-spacing: .5px;
+  padding: 10px 8px;
+  border-radius: 7px;
+  background: #23232b;
+  border: 1px solid #3a3a44;
+  color: #cfcfda;
+}
+button.hidebtn:hover { border-color: #ffb36b; color: #ffe2b0; }
+button.hidebtn.active {
+  background: #5a4515;
+  border-color: #ffb36b;
+  color: #ffe2b0;
+  box-shadow: 0 0 10px rgba(255, 179, 107, .25);
+}
+button.hidebtn:disabled { opacity: .45; }
 
 /* ===== Timeline header + MIDI REC bar ===== */
 #tlHeader {

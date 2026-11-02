@@ -10,7 +10,8 @@
     "start": "electron .",
     "sim": "node tools/resolume-sim.js",
     "loopback": "node tools/loopback-test.js",
-    "dist": "electron-builder --mac dir"
+    "dist": "electron-builder --mac dir",
+    "rebuild": "electron-builder --mac dir && open \"dist/mac-arm64/HS TIMECODE.app\""
   },
   "dependencies": {
     "osc": "^2.4.5"

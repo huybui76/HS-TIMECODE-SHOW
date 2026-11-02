@@ -18,6 +18,8 @@ const state = {
   autoAdvance: true,
   sel: null,               // cue đang chọn (tham chiếu object)
   multiSel: new Set(),     // vùng chọn nhiều cue (⌘-click)
+  selAudioLaneId: null,    // clip nhạc đang chọn trên lane A
+  clipboardAudio: null,    // {songId, offset} — clip nhạc đã sao chép
   clipboard: null,
   follow: true,
   listenPort: 7000,
@@ -37,6 +39,11 @@ const state = {
 };
 
 const LANE_COLORS = ['#4f8cff', '#9a6bff', '#3ecfb2', '#e5c25a', '#ff8a5c', '#5cd6ff', '#ff6b9d', '#a8e34d'];
+/* ===== Timeline CapCut-style ===== */
+const TL_MIN_SEC = 180;   // timelineDuration tối thiểu = viewport mặc định 3 phút (00:00 → 03:00)
+const TL_PAD_SEC = 10;    // padding sau item cuối khi nội dung vượt 3 phút
+const PPS_MIN = 0.5;      // pixelsPerSecond xa nhất (zoom out)
+const PPS_MAX = 800;      // pixelsPerSecond sát nhất (zoom in)
 const MAX_MON_ROWS = 300;
 const AUTOSAVE_KEY = 'hs-timecode-autosave';
 let idSeq = Date.now();
@@ -47,6 +54,7 @@ const audio = $('player');
 const canvas = $('timeline');
 const ctx = canvas.getContext('2d');
 let audioCtx = null;
+let audioSongId = null;   // id bài đang phát trên element <audio> (theo clip, không theo mốc)
 let rxLocal = 0;
 let flat = [];             // [{t, ev, folder}] — cue đóng gói theo OFFSET, sắp tăng dần
 
@@ -108,6 +116,15 @@ function laneColor(lane) {
 /* ================= Quản lý lane (V/A/R) ================= */
 function laneById(id) { return state.lanes.find((l) => l.id === id) || null; }
 function laneByName(name) { return state.lanes.find((l) => l.name === name) || null; }
+function laneLockedByName(name) { const l = laneByName(name); return !!(l && l.locked); }
+function toggleLaneLock(id) {
+  const l = laneById(id);
+  if (!l) return;
+  l.locked = !l.locked;
+  if (l.locked) flashStatus(`Lane ${l.name} đã KHÓA — cue không dời/đổi độ dài được.`);
+  else flashStatus(`Lane ${l.name} đã mở khóa.`);
+  scheduleAutosave();
+}
 
 function nextLaneName(kind) {
   let n = 1;
@@ -116,7 +133,7 @@ function nextLaneName(kind) {
 }
 
 function addLane(kind, silent) {
-  const lane = { id: nid(), name: nextLaneName(kind), kind, songId: null };
+  const lane = { id: nid(), name: nextLaneName(kind), kind, songId: null, songOffset: 0, locked: false };
   state.lanes.push(lane);
   if (kind === 'R' && !state.recLaneId) state.recLaneId = lane.id;
   if (!silent) { renderLanes(); renderTimelineHeader(); scheduleAutosave(); }
@@ -152,10 +169,11 @@ function ensureLanesForProject() {
   names.forEach((name) => {
     if (!laneByName(name)) {
       const kind = /^[VA]/.test(name) ? name[0] : 'V';
-      state.lanes.push({ id: nid(), name, kind, songId: null });
+      state.lanes.push({ id: nid(), name, kind, songId: null, songOffset: 0, locked: false });
     }
   });
   if (!state.lanes.length) {
+    addLane('V', true);
     addLane('V', true);
     addLane('V', true);
     addLane('A', true);
@@ -178,7 +196,8 @@ function renderLanes() {
 function renderTimelineHeader() {
   const h = $('tlHeader');
   const title = h.querySelector('.tl-title');
-  title.innerHTML = `TIMELINE — <span id="tlSongName">${escapeHtml(curSong() ? curSong().name : 'Chính')}</span>`;
+  const f = curFolder();
+  title.innerHTML = `TIMELINE — <span id="tlSongName">${escapeHtml(f ? f.name : 'Chính')}</span>`;
 }
 
 $('btnLaneV').addEventListener('click', () => addLane('V'));
@@ -268,11 +287,19 @@ function refreshVF() {
 
 /* ================= Thư mục cue ================= */
 function addFolder(name) {
-  // mỗi thư mục là một bài timecode riêng — cue luôn bắt đầu TRỐNG
-  const f = { id: nid(), name: name || `Thư mục ${state.folders.length + 1}`, offset: 0, events: [], color: '', hidden: false };
+  // mỗi BÀI là một timecode riêng — timeline mới luôn TRỐNG, không liên quan bài trước
+  const f = { id: nid(), name: name || `Bài ${state.folders.length + 1}`, offset: 0, events: [], cues: [], color: '', hidden: false, collapsed: false };
   state.folders.push(f);
   state.activeFolderId = f.id;
+  pause();                 // thêm bài = đứng im ngay, không tự chạy
+  state.frame = 0;
+  state.sel = null;
+  state.multiSel = new Set();
+  state.viewStart = 0;
+  state.ppsInit = false;   // thước về mặc định 2 phút
   refreshAll();
+  renderProps();
+  updateSelBar();
   return f;
 }
 
@@ -280,19 +307,37 @@ function removeFolder(id) {
   const i = state.folders.findIndex((f) => f.id === id);
   if (i < 0) return;
   const f = state.folders[i];
-  if (f.events.length && !confirm(`Xóa thư mục "${f.name}" (${f.events.length} cue)?`)) return;
+  if (f.events.length && !confirm(`Xóa bài "${f.name}" (${f.events.length} cue)?`)) return;
   state.folders.splice(i, 1);
   if (state.sel && !state.folders.some((x) => x.events.includes(state.sel))) state.sel = null;
-  if (!state.folders.length) addFolder('Chính');
+  if (!state.folders.length) addFolder();
   else if (state.activeFolderId === id) state.activeFolderId = state.folders[Math.max(0, i - 1)].id;
   refreshAll();
 }
 
-function makeCue(frame, address, args) {
-  return {
-    id: nid(), frame, address, args: args || [1], lane: laneOf(address),
-    name: '', duration: 0, note: '', color: '', enabled: true, mode: 'trigger'
-  };
+/* Cue GỐC (định nghĩa, cố định trong danh sách) + đối tượng ĐẶT trên timeline.
+   Kéo cue gốc vào timeline nhiều lần chỉ tạo đối tượng đặt — cue gốc không đổi. */
+function makeDef(address, args) {
+  return { id: nid(), address, args: args || [1], name: '', note: '', color: '', mode: 'trigger' };
+}
+
+function makePlacement(frame, cueId) {
+  return { id: nid(), cueId, frame, lane: 'V1', duration: 0, enabled: true };
+}
+
+function defOf(ev) {
+  const f = state.folders.find((fo) => fo.events.includes(ev));
+  return f ? (f.cues.find((c) => c.id === ev.cueId) || null) : null;
+}
+
+function findOrMakeDef(f, address, args) {
+  let d = f.cues.find((c) => c.address === address);
+  if (!d) {
+    d = makeDef(address, args);
+    d.name = address.split('/').filter(Boolean).slice(-1)[0] || 'Cue';
+    f.cues.push(d);
+  }
+  return d;
 }
 
 const SWATCHES = [
@@ -302,12 +347,14 @@ const SWATCHES = [
   '#5a6070', '#46f0b0'
 ];
 
-function cueColor(ev, lane, folder) {
-  return ev.color || (folder && folder.color) || laneColor(lane || ev.lane);
+function cueColor(ev, folder) {
+  const d = folder ? folder.cues.find((c) => c.id === ev.cueId) : defOf(ev);
+  return (d && d.color) || laneColor(ev.lane);
 }
 
-function cueLabel(ev) {
-  return ev.name || ev.address;
+function cueLabel(ev, folder) {
+  const d = folder ? folder.cues.find((c) => c.id === ev.cueId) : defOf(ev);
+  return d ? (d.name || d.address) : '?';
 }
 
 function insertCue(folder, cue) {
@@ -328,6 +375,17 @@ function renderFolders() {
 
     const head = document.createElement('div');
     head.className = 'fhead';
+    if (f.color) head.style.background = f.color + '26';
+    const chev = document.createElement('button');
+    chev.className = 'fdel chev';
+    chev.textContent = f.collapsed ? '▸' : '▾';
+    chev.title = f.collapsed ? 'Xổ danh sách cue ra' : 'Thu gọn thư mục';
+    chev.addEventListener('click', (e) => {
+      e.stopPropagation();
+      f.collapsed = !f.collapsed;
+      renderFolders();
+      scheduleAutosave();
+    });
     const name = document.createElement('input');
     name.className = 'fname';
     name.value = f.name;
@@ -351,7 +409,7 @@ function renderFolders() {
     const colBtn = document.createElement('button');
     colBtn.className = 'fdel fcol';
     colBtn.textContent = '🎨';
-    colBtn.title = 'Đổi màu thư mục (tô màu cue bên trong)';
+    colBtn.title = 'Đổi màu khung thư mục';
     colBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       openFolderPalette(f, colBtn);
@@ -359,12 +417,14 @@ function renderFolders() {
     const del = document.createElement('button');
     del.className = 'fdel';
     del.textContent = '🗑';
-    del.title = 'Xóa thư mục';
+    del.title = 'Xóa bài';
     del.addEventListener('click', (e) => { e.stopPropagation(); removeFolder(f.id); });
-    head.append(name, cnt, eye, colBtn, del);
+    head.append(chev, name, cnt, eye, colBtn, del);
     head.addEventListener('click', (e) => {
-      if (e.target === name || e.target === del || e.target === eye || e.target === colBtn) return;
+      if (e.target === name || e.target === del || e.target === eye || e.target === colBtn || e.target === chev) return;
       state.activeFolderId = f.id;
+      // lần 1: thu gọn thư mục — lần 2: xổ danh sách cue ra
+      f.collapsed = !f.collapsed;
       fillRecFolderSel();
       renderFolders();
       scheduleAutosave();
@@ -390,57 +450,67 @@ function renderFolders() {
 
     const cuesBox = document.createElement('div');
     cuesBox.className = 'fcues';
-    const shown = q ? f.events.filter((ev) => ev.address.toLowerCase().includes(q)) : f.events;
+    cuesBox.style.display = f.collapsed ? 'none' : '';
+    // Danh sách hiện CUE GỐC (cố định) — kéo vào timeline tạo điểm đặt, cue gốc không đổi
+    const shown = q ? f.cues.filter((d) => (d.name + ' ' + d.address).toLowerCase().includes(q)) : f.cues;
     if (!shown.length) {
       const em = document.createElement('div');
       em.className = 'folder-empty';
       em.textContent = q ? 'Không có cue khớp tìm kiếm' : 'Chưa có cue — bật REC và gõ MIDI, hoặc nhấn ＋ Cue';
       cuesBox.appendChild(em);
     }
-    shown.forEach((ev) => {
+    shown.forEach((def) => {
+      const nPlace = f.events.filter((ev) => ev.cueId === def.id).length;
       const row = document.createElement('div');
-      row.className = 'cue-row' + (selSet().has(ev) ? ' sel' : '');
+      row.className = 'cue-row';
       row.draggable = true;
       row.addEventListener('dragstart', (e) => {
-        // kéo từ danh sách luôn tạo bản sao — cue gốc ở lại, kéo được nhiều lần
-        e.dataTransfer.setData('text/hs-cue', `${f.id}:${ev.id}:1`);
+        // kéo cue gốc vào timeline = ĐẶT điểm mới — cue gốc giữ nguyên trong danh sách
+        e.dataTransfer.setData('text/hs-cue', `${f.id}:${def.id}`);
         e.dataTransfer.effectAllowed = 'copy';
       });
-      if (ev.color) row.style.boxShadow = `inset 3px 0 0 ${ev.color}`;
-      if (ev.enabled === false) row.style.opacity = '0.45';
-      const tc = document.createElement('span');
-      tc.className = 'tc';
-      tc.textContent = tcString(f.offset + ev.frame, state.fps);
-      tc.title = 'Nhấp đúp để sửa timecode';
+      if (def.color) row.style.boxShadow = `inset 3px 0 0 ${def.color}`;
+      const info = document.createElement('div');
+      info.className = 'cue-info';
+      const nm = document.createElement('span');
+      nm.className = 'cue-name';
+      nm.textContent = def.name || '(chưa có tên)';
+      const ad = document.createElement('span');
+      ad.className = 'cue-addr';
+      ad.textContent = def.address || 'chưa điền địa chỉ OSC';
+      ad.title = (def.address || 'điền địa chỉ trong THUỘC TÍNH CUE') + ' — cue gốc, kéo vào timeline để đặt';
+      info.append(nm, ad);
       const ln = document.createElement('span');
       ln.className = 'ln';
-      ln.textContent = ev.lane;
-      const ad = document.createElement('span');
-      ad.className = 'ad';
-      ad.textContent = cueLabel(ev);
-      ad.title = ev.address + ' — nhấp đúp để sửa';
+      ln.textContent = '×' + nPlace;
+      ln.title = 'Số điểm đặt trên timeline';
       const cx = document.createElement('button');
       cx.className = 'cx';
       cx.textContent = '✕';
-      cx.title = 'Xóa cue';
-      row.append(tc, ln, ad, cx);
+      cx.title = 'Xóa cue gốc + toàn bộ điểm đặt của nó';
+      row.append(info, ln, cx);
       row.addEventListener('click', (e) => {
         if (e.target === cx) return;
-        state.sel = ev;
-        renderFolders();
-        renderProps();
-        if (!state.playing) setFrame(f.offset + ev.frame);
-      });
-      tc.addEventListener('dblclick', () => editCueTc(f, ev, tc));
-      ad.addEventListener('dblclick', () => {
-        const v = prompt('Địa chỉ OSC:', ev.address);
-        if (v && v.startsWith('/')) { ev.address = v.trim(); ev.lane = laneOf(ev.address); refreshAll(); }
+        const first = f.events.find((ev) => ev.cueId === def.id);
+        if (first) {
+          state.sel = first;
+          state.multiSel = new Set([first]);
+          renderProps();
+          updateSelBar();
+          if (!state.playing) setFrame(f.offset + first.frame);
+        } else {
+          flashStatus('Cue này chưa có trên timeline — kéo thả vào lane V để đặt.');
+        }
       });
       cx.addEventListener('click', () => {
-        const i = f.events.indexOf(ev);
-        if (i >= 0) f.events.splice(i, 1);
-        if (state.sel === ev) state.sel = null;
+        const n = f.events.filter((ev) => ev.cueId === def.id).length;
+        if (n && !confirm(`Xóa cue "${def.name || def.address}" và ${n} điểm đặt trên timeline?`)) return;
+        f.cues.splice(f.cues.indexOf(def), 1);
+        f.events = f.events.filter((ev) => ev.cueId !== def.id);
+        if (state.sel && !f.events.includes(state.sel)) state.sel = null;
         refreshAll();
+        renderProps();
+        updateSelBar();
       });
       cuesBox.appendChild(row);
     });
@@ -492,28 +562,6 @@ function openFolderPalette(f, anchor) {
   }, 0);
 }
 
-function editCueTc(folder, ev, span) {
-  const inp = document.createElement('input');
-  inp.value = tcString(folder.offset + ev.frame, state.fps);
-  inp.style.width = '92px';
-  inp.style.background = '#0e0e12';
-  span.innerHTML = '';
-  span.appendChild(inp);
-  inp.focus();
-  inp.select();
-  const commit = () => {
-    const v = parseTC(inp.value, state.fps);
-    if (v !== null) ev.frame = v - folder.offset; // frame nội bộ = vị trí hiệu dụng − OFFSET
-    refreshAll();
-  };
-  inp.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter') commit();
-    if (e.key === 'Escape') renderFolders();
-  });
-  inp.addEventListener('blur', () => commit());
-}
-
 /* ================= Kho nhạc ================= */
 function addSongFile(path) {
   const song = {
@@ -537,17 +585,22 @@ function removeSong(id) {
   const i = state.songs.findIndex((s) => s.id === id);
   if (i < 0) return;
   const wasActive = i === state.songIndex;
+  const song = state.songs[i];
   state.songs.splice(i, 1);
-  if (wasActive) {
-    state.songIndex = -1;
-    audio.pause();
-    audio.removeAttribute('src');
-    audio.load();
-  } else if (i < state.songIndex) {
-    state.songIndex--;
-  }
+  if (wasActive) state.songIndex = -1;
+  else if (i < state.songIndex) state.songIndex--;
+  // gỡ MỌI tham chiếu còn sót của bài vừa xóa (không để timeline giữ trọng số cũ)
+  state.lanes.forEach((l) => {
+    if (l.songId === song.id) { l.songId = null; l.songOffset = 0; }
+  });
+  if (state.selAudioLaneId && !(laneById(state.selAudioLaneId) || {}).songId) state.selAudioLaneId = null;
+  // dừng hẳn âm thanh đang phát của bài vừa xóa — không để tiếng vẫn vang
+  pause();
+  if (audioSongId === song.id) audioSongId = null;
+  if (wasActive) { audio.removeAttribute('src'); audio.load(); }
   renderSongs();
   updateAudioName();
+  infoDirty = true;   // CÒN LẠI tính lại ngay, không giữ trọng số của bài vừa xóa
   scheduleAutosave();
 }
 
@@ -729,35 +782,78 @@ function setupDrop(zone, activate) {
 }
 
 /* ================= Đồng hồ ================= */
-function totalSeconds() {
+function activeSongLane() {
   const s = curSong();
-  if (s && s.path && s.duration > 0) return s.duration;
-  const lastT = flat.length ? flat[flat.length - 1].t / state.fps : 0;
-  return Math.max(600, lastT + 30);
+  if (!s) return null;
+  return state.lanes.find((l) => l.kind === 'A' && l.songId === s.id) || null;
+}
+
+function activeSongOffset() {
+  const l = activeSongLane();
+  return l ? (l.songOffset || 0) : 0;
+}
+
+/* Clip nhạc đang chứa playhead (lane A bất kỳ) — nguồn phát thật của engine */
+function findClipAtFrame(fr) {
+  const sec = fr / state.fps;
+  for (const l of state.lanes) {
+    if (l.kind !== 'A' || !l.songId || l.locked) continue;
+    const s = state.songs.find((x) => x.id === l.songId);
+    if (!s || !s.duration) continue;
+    const off = l.songOffset || 0;
+    if (sec >= off && sec <= off + s.duration) return { song: s, offset: off, lane: l };
+  }
+  return null;
+}
+
+function totalSeconds() {
+  /* timelineDuration — thời lượng THỰC của nội dung timeline (giây).
+     Tách bạch hoàn toàn với zoom (state.pps) và scroll (state.viewStart):
+       • nội dung ≤ 3 phút  → timeline = 3 phút (viewport mặc định)
+       • nội dung vượt 3 phút → timeline = nội dung cuối + 10 giây padding (không giới hạn) */
+  let endFrames = 0;
+  state.lanes.forEach((l) => {
+    if (l.kind !== 'A' || !l.songId) return;
+    const s = state.songs.find((x) => x.id === l.songId);
+    if (s && s.duration > 0) {
+      const end = ((l.songOffset || 0) + s.duration) * state.fps;
+      if (end > endFrames) endFrames = end;
+    }
+  });
+  const f = curFolder();
+  if (state.showAllFolders || !f) {
+    flat.forEach((x) => {
+      const end = x.t + (x.ev.duration || 0);
+      if (end > endFrames) endFrames = end;
+    });
+  } else {
+    f.events.forEach((ev) => {
+      const end = ev.frame + (ev.duration || 0);
+      if (end > endFrames) endFrames = end;
+    });
+  }
+  return Math.max(TL_MIN_SEC, endFrames / state.fps + TL_PAD_SEC);
 }
 
 function totalFrames() { return Math.max(1, Math.round(totalSeconds() * state.fps)); }
 
-function setFrame(f, fromAudio = false) {
+function setFrame(f) {
   state.frame = clamp(f, 0, totalFrames());
-  if (mode() === 'audio' && !fromAudio && curSong().duration > 0) {
-    audio.currentTime = clamp(state.frame / state.fps, 0, Math.max(0, curSong().duration - 0.02));
+  // đang dừng: xem trước âm thanh bám theo clip dưới thanh đò
+  if (!state.playing) {
+    const clip = findClipAtFrame(state.frame);
+    if (clip && audioSongId === clip.song.id && audio.paused && !audio.ended) {
+      const local = clamp(state.frame / state.fps - clip.offset, 0, Math.max(0, clip.song.duration - 0.02));
+      if (Math.abs(audio.currentTime - local) > 0.05) audio.currentTime = local;
+    }
   }
   state.playbackIdx = lowerBoundFlat(state.frame);
 }
 
 function play() {
-  const s = curSong();
-  if (mode() === 'audio') {
-    if (!s) { setStatus('Chưa có nhạc — thêm bài trong danh sách NHÁC trước.'); return; }
-    if (s.duration === 0) { setStatus('Đang nạp nhạc, thử lại giây lát…'); return; }
-  }
   if (state.frame >= totalFrames() - 1) setFrame(0);
   state.playing = true;
-  if (mode() === 'audio') {
-    audio.playbackRate = state.speed;
-    audio.play().catch((e) => setStatus('Không phát được nhạc: ' + e.message));
-  }
+  // nhạc do tick() bật khi playhead đi vào clip — timeline luôn chạy từ vị trí thanh đò
   if (state.recArmed && state.recMode === 'overwrite') {
     const f = curFolder();
     if (f) {
@@ -781,16 +877,11 @@ function togglePlay() { state.playing ? pause() : play(); }
 function atEndReached() {
   if (state.loop) {
     setFrame(0);
-    if (mode() === 'audio') { audio.currentTime = 0; audio.play().catch(() => {}); }
-    return;
-  }
-  if (state.autoAdvance && state.songIndex >= 0 && state.songIndex < state.songs.length - 1) {
-    activateSong(state.songIndex + 1, true);
-    return;
+    return; // tick() tự bật nhạc khi playhead đi vào clip
   }
   state.frame = totalFrames();
   pause();
-  setStatus('Đã hết bài cuối.');
+  setStatus('Đã hết timeline.');
 }
 
 /* ================= Phát cue ================= */
@@ -798,13 +889,17 @@ function fireDue() {
   while (state.playbackIdx < flat.length && flat[state.playbackIdx].t <= state.frame) {
     const x = flat[state.playbackIdx++];
     if (x.ev.enabled === false) continue;
-    sendOsc(x.ev.address, x.ev.args);
+    const d = x.f.cues.find((c) => c.id === x.ev.cueId);
+    if (d && d.address) sendOsc(d.address, d.args);
   }
 }
 
 function nextCue() {
+  // cue tiếp theo chỉ "mở" sau khi chạy HẾT chiều dài cue trước (t + duration)
   for (const x of refreshVF()) {
-    if (x.t > state.frame && x.ev.enabled !== false) return x;
+    if (x.ev.enabled === false) continue;
+    const end = x.t + Math.max(0, x.ev.duration || 0);
+    if (end > state.frame) return x;
   }
   return null;
 }
@@ -824,6 +919,7 @@ function refreshAll() {
   fillRecFolderSel();
   renderLanes();
   updateSelBar();
+  infoDirty = true;
   noteChange();
   updateStatsBar();
   scheduleAutosave();
@@ -853,9 +949,11 @@ function onOscMessage(msg) {
   $('mrLast').textContent = msg.address + '  ' + (msg.args || []).join(',');
   if (state.recArmed && state.playing && passFilter(msg.address)) {
     const f = curFolder();
-    if (!f) { setStatus('Chưa có thư mục cue — nhấn ＋ Thư mục.'); return; }
+    if (!f) { setStatus('Chưa có thư mục cue — nhấn ＋ Bài.'); return; }
     const rl = recLane();
-    const cue = makeCue(Math.floor(state.frame) - f.offset, msg.address, msg.args);
+    if (rl && rl.locked) { setStatus(`Lane ghi ${rl.name} đang khóa — mở khóa để ghi.`); return; }
+    const def = findOrMakeDef(f, msg.address, msg.args);
+    const cue = makePlacement(Math.floor(state.frame) - f.offset, def.id);
     cue.lane = rl ? rl.name : 'V1';
     insertCue(f, cue);
     refreshAll();
@@ -866,9 +964,9 @@ function onOscMessage(msg) {
 /* Tạo cue từ một message OSC bất kỳ (nút + trên Monitor / OSC → Cue) */
 function cueFromOsc(address, args) {
   let f = curFolder();
-  if (!f) f = addFolder('Chính');
-  const cue = makeCue(Math.floor(state.frame) - f.offset, address, args);
-  cue.name = address.split('/').filter(Boolean).slice(-1)[0] || 'Cue';
+  if (!f) f = addFolder();
+  const def = findOrMakeDef(f, address, args);
+  const cue = makePlacement(Math.floor(state.frame) - f.offset, def.id);
   const rl = recLane();
   cue.lane = rl ? rl.name : 'V1';
   insertCue(f, cue);
@@ -879,16 +977,68 @@ function cueFromOsc(address, args) {
 }
 
 /* ================= Timeline ================= */
-const GUT = 56, TOP = 30;
+const GUT = 64, TOP = 30;
+
+function sliderToPps(v) { return PPS_MIN * Math.pow(PPS_MAX / PPS_MIN, v / 100); }   // 0.5 → 800 px/s
+function ppsToSlider(p) { return Math.round(Math.log(clamp(p, PPS_MIN, PPS_MAX) / PPS_MIN) / Math.log(PPS_MAX / PPS_MIN) * 100); }
 
 function frameToX(f) { return ((f / state.fps) - state.viewStart) * state.pps + GUT; }
 function xToFrame(x) { return ((x - GUT) / state.pps + state.viewStart) * state.fps; }
+
+/* ===== Zoom / Scroll — CapCut-style =====
+   • pixelsPerSecond (state.pps) = tỷ lệ zoom — KHÔNG đụng dữ liệu, KHÔNG đụng playhead
+   • viewStart (giây) = scrollLeft — chỉ đổi vị trí nhìn thấy
+   • timelineDuration = totalSeconds() — tự mở rộng khi nội dung vượt 3 phút, cộng 10s padding
+   • visibleDuration = (width - GUT) / pps — khoảng đang thấy trên màn hình */
+function visibleSec() {
+  const W = canvas.clientWidth || 0;
+  return (state.pps && W > GUT) ? (W - GUT) / state.pps : 0;
+}
+function clampView() {
+  // scroll chỉ trong 0 … timelineDuration − visibleDuration
+  const vs = visibleSec();
+  if (!vs) return;
+  state.viewStart = clamp(state.viewStart, 0, Math.max(0, totalSeconds() - vs));
+}
+function syncZoomSlider() {
+  const pr = $('ppsRange');
+  if (pr) pr.value = ppsToSlider(state.pps);
+}
+function anchorSecDefault() {
+  // zoom neo vào vị trí đang focus: playhead nếu thấy nó, không thì giữa vùng nhìn
+  const curSec = state.frame / state.fps;
+  const vs = visibleSec();
+  if (vs && curSec >= state.viewStart && curSec <= state.viewStart + vs) return curSec;
+  return state.viewStart + vs / 2;
+}
+function applyZoom(targetPps, anchorSec) {
+  const pps0 = state.pps || targetPps;
+  if (pps0 <= 0) return;
+  if (anchorSec === undefined) anchorSec = anchorSecDefault();
+  const xAnchor = (anchorSec - state.viewStart) * pps0 + GUT;   // điểm neo giữ nguyên pixel
+  state.pps = clamp(targetPps, PPS_MIN, PPS_MAX);
+  state.viewStart = Math.max(0, anchorSec - (xAnchor - GUT) / state.pps);
+  clampView();
+  syncZoomSlider();
+}
+function zoomPps(k) { applyZoom((state.pps || ((canvas.clientWidth - GUT - 12) / TL_MIN_SEC)) * k); }
 
 function autoDur(t, lane) {
   for (const fx of VF) {
     if (fx.ev.lane === lane && fx.t > t) return Math.max(1, fx.t - t);
   }
   return Math.round(state.fps * 0.75);
+}
+
+/* Chỉ cho đổi độ dài khi rê vào 2 ĐẦU cue — ngưỡng co theo độ rộng khối,
+   khối nhỏ (zoom xa) thì không có vùng mép để tránh bấm giữa mà nhảy thời gian */
+function cueResizeMode(x, x1, x2) {
+  const bw = x2 - x1;
+  const edgeT = bw >= 40 ? 8 : (bw >= 16 ? 4 : 0);
+  if (!edgeT) return null;
+  if (Math.abs(x - x2) <= edgeT) return 'resize-r';
+  if (Math.abs(x - x1) <= edgeT) return 'resize-l';
+  return null;
 }
 
 function eventEndFrame(x) {
@@ -919,9 +1069,12 @@ function drawTimeline() {
 
   const dur = totalSeconds();
   if (!state.ppsInit && W > GUT + 50) {
-    state.pps = (W - GUT - 12) / dur;
+    // CapCut-style: mới mở là thấy đúng 3 phút, bất kể nội dung ngắn hơn
+    state.pps = (W - GUT - 12) / TL_MIN_SEC;
     state.ppsInit = true;
+    state.lastTotalSec = dur;
   }
+  if (state.pps) clampView();
   if (!state.pps) return;
 
   const rows = timelineRows();
@@ -931,6 +1084,7 @@ function drawTimeline() {
     const viewSec = (W - GUT) / state.pps;
     if (curSec < state.viewStart || curSec > state.viewStart + viewSec * 0.85) {
       state.viewStart = Math.max(0, curSec - viewSec * 0.25);
+      clampView();
     }
   }
 
@@ -955,57 +1109,82 @@ function drawTimeline() {
     ctx.fillText(`${mm}:${String(ss).padStart(2, '0')}`, x + 4, TOP / 2 - 1);
   }
 
-  // lane (V/A/R theo thứ tự người dùng) + nút xóa trên gutter
-  rows.forEach((r, ri) => {
+  // lane (V/A/R theo thứ tự người dùng) + nút × (xóa) và 🔒 (khóa) trên gutter
+  rows.forEach((r) => {
+    const laneObj = laneByName(r.lane);
+    const locked = !!(laneObj && laneObj.locked);
     ctx.fillStyle = r.isAudio ? '#0e1613' : (r.kind === 'R' ? '#171310' : '#141419');
     ctx.fillRect(GUT, r.y, W - GUT, r.h - 6);
     ctx.fillStyle = '#202027';
     ctx.fillRect(0, r.y, GUT - 6, r.h - 6);
+    if (locked) {
+      ctx.fillStyle = 'rgba(255,180,80,0.10)';
+      ctx.fillRect(GUT, r.y, W - GUT, r.h - 6);
+    }
     ctx.fillStyle = r.isAudio ? '#3ecfb2' : (r.kind === 'R' ? '#ffb36b' : '#9a9aa5');
-    ctx.font = 'bold 10px -apple-system, sans-serif';
+    ctx.font = 'bold 13px -apple-system, sans-serif';
     ctx.textAlign = 'right';
-    ctx.fillText(r.lane, GUT - 12, r.y + (r.h - 6) / 2);
+    ctx.fillText(r.lane, GUT - 14, r.y + (r.h - 6) / 2);
     ctx.textAlign = 'left';
-    // nút xóa lane ( × nhỏ dưới tên khi hover impossible trên canvas — luôn hiện mờ )
-    ctx.fillStyle = 'rgba(255,255,255,0.18)';
-    ctx.font = '9px -apple-system, sans-serif';
-    ctx.fillText('×', 4, r.y + 8 + (ri === 0 ? 0 : 0));
-    // xóa bằng chuột phải tại gutter
+    // nút × xóa lane — TO 21px, vùng bấm 0–28px
+    ctx.fillStyle = 'rgba(255,255,255,0.42)';
+    ctx.font = 'bold 21px -apple-system, sans-serif';
+    ctx.fillText('×', 9, r.y + (r.h - 6) / 2 + 1);
+    // nút khóa lane — TO 17px, đổi màu khi khóa, vùng bấm 28–50px
+    ctx.font = '17px -apple-system, sans-serif';
+    ctx.fillStyle = locked ? '#ffb36b' : 'rgba(255,255,255,0.32)';
+    ctx.fillText(locked ? '🔒' : '🔓', 33, r.y + (r.h - 6) / 2 + 1);
   });
 
-  // các lane A có nhạc → vẽ waveform của bài gắn trên lane đó
+  // các lane A có nhạc → vẽ CLIP AUDIO (khối kéo ngang được, có offset riêng)
   rows.filter((r) => r.isAudio && r.songId).forEach((r) => {
     const song = state.songs.find((s) => s.id === r.songId);
+    const laneObj = laneByName(r.lane);
     if (!song || !song.path) return;
+    const off = (laneObj && laneObj.songOffset) || 0;
+    const songDur = song.duration > 0 ? song.duration : (song.decoding ? 0 : 120);
+    if (!songDur) return;
+    const cx1 = (off - state.viewStart) * state.pps + GUT;
+    const cx2 = (off + songDur - state.viewStart) * state.pps + GUT;
+    const bx1 = Math.max(cx1, GUT), bx2 = Math.min(cx2, W);
+    if (bx2 <= bx1) return;
+    // nền clip
+    const selAudio = state.selAudioLaneId && laneById(state.selAudioLaneId) === laneObj;
+    ctx.fillStyle = selAudio ? 'rgba(62, 207, 178, 0.22)' : 'rgba(62, 207, 178, 0.10)';
+    ctx.fillRect(bx1, r.y + 1, bx2 - bx1, r.h - 8);
+    ctx.strokeStyle = selAudio ? '#ffffff' : '#3ecfb2';
+    ctx.lineWidth = selAudio ? 2.5 : 1.5;
+    ctx.strokeRect(bx1 + .5, r.y + 1.5, bx2 - bx1 - 1, r.h - 9);
+    ctx.lineWidth = 1;
+    // mép kéo 2 bên
+    ctx.fillStyle = '#3ecfb2';
+    ctx.fillRect(bx1, r.y + 1, 3, r.h - 8);
+    ctx.fillRect(bx2 - 3, r.y + 1, 3, r.h - 8);
     const mid = r.y + (r.h - 6) / 2;
-    const half = (r.h - 6) / 2 - 3;
-    const songDur = song.duration || dur;
-    if (song.peaks) {
+    const half = (r.h - 6) / 2 - 6;
+    if (song.peaks && songDur > 0) {
       ctx.strokeStyle = '#3ecfb2';
       ctx.globalAlpha = 0.9;
       ctx.beginPath();
-      for (let x = GUT; x < W; x++) {
-        const sec = (x - GUT) / state.pps + state.viewStart;
-        if (sec < 0 || sec > songDur) continue;
-        const bi = Math.min(song.peaks.n - 1, Math.floor((sec / songDur) * song.peaks.n));
+      for (let x = Math.ceil(bx1); x < bx2; x++) {
+        const songSec = (x - GUT) / state.pps + state.viewStart - off;
+        if (songSec < 0 || songSec > songDur) continue;
+        const bi = Math.min(song.peaks.n - 1, Math.floor((songSec / songDur) * song.peaks.n));
         ctx.moveTo(x + .5, mid - song.peaks.maxs[bi] * half);
         ctx.lineTo(x + .5, mid - song.peaks.mins[bi] * half);
       }
       ctx.stroke();
       ctx.globalAlpha = 1;
-    } else {
-      ctx.strokeStyle = '#2a4a41';
-      ctx.beginPath(); ctx.moveTo(GUT, mid); ctx.lineTo(W, mid); ctx.stroke();
+    } else if (songDur === 0) {
       ctx.fillStyle = '#4a7a6d';
-      ctx.font = '10px -apple-system, sans-serif';
-      ctx.fillText(song.decoding ? 'đang phân tích sóng nhạc…' : 'kéo bài hát từ danh sách NHÁC vào đây', GUT + 8, mid - 6);
+      ctx.font = '11px -apple-system, sans-serif';
+      ctx.fillText(song.decoding ? 'đang phân tích sóng nhạc…' : song.name, bx1 + 10, mid);
     }
-    const endX = frameToX(songDur * state.fps);
-    if (endX > GUT && endX < W) {
-      ctx.strokeStyle = '#3ecfb2';
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath(); ctx.moveTo(endX, r.y); ctx.lineTo(endX, r.y + r.h - 6); ctx.stroke();
-      ctx.setLineDash([]);
+    // tên bài trên clip
+    if (songDur > 0 && bx2 - bx1 > 60) {
+      ctx.fillStyle = '#bff5e8';
+      ctx.font = 'bold 11px -apple-system, sans-serif';
+      ctx.fillText(song.name.slice(0, Math.floor((bx2 - bx1) / 7)), bx1 + 8, r.y + 13);
     }
   });
 
@@ -1019,10 +1198,25 @@ function drawTimeline() {
     if (x2 < GUT || x1 > W) return;
     const bx = Math.max(x1, GUT), bw = Math.max(3, x2 - x1 - 2);
     const isSelected = selSet().has(x.ev);
-    ctx.fillStyle = cueColor(x.ev, null, x.f);
-    ctx.globalAlpha = isSelected ? 1 : (x.ev.enabled === false ? 0.3 : 0.85);
+    const isHidden = x.ev.enabled === false;
+    ctx.fillStyle = cueColor(x.ev, x.f);
+    ctx.globalAlpha = isSelected ? 0.9 : (isHidden ? 0.30 : 0.85);
     ctx.fillRect(bx, row.y + 2, bw, row.h - 10);
     ctx.globalAlpha = 1;
+    if (isHidden) {
+      // sọc chéo trắng + mờ — cue ẩn không gửi OSC
+      ctx.save();
+      ctx.beginPath(); ctx.rect(bx, row.y + 2, bw, row.h - 10); ctx.clip();
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.lineWidth = 2;
+      for (let sx = bx - row.h; sx < bx + bw; sx += 8) {
+        ctx.beginPath();
+        ctx.moveTo(sx, row.y + row.h - 8);
+        ctx.lineTo(sx + row.h - 4, row.y + 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
     // gợn mép hai bên — gợi ý có thể kéo đổi độ dài
     ctx.fillStyle = 'rgba(255,255,255,0.25)';
     if (bw > 10) { ctx.fillRect(bx, row.y + 2, 3, row.h - 10); ctx.fillRect(bx + bw - 3, row.y + 2, 3, row.h - 10); }
@@ -1035,7 +1229,7 @@ function drawTimeline() {
     if (bw > 30) {
       ctx.fillStyle = '#0b0b0e';
       ctx.font = 'bold 12px Menlo, monospace';
-      const label = cueLabel(x.ev);
+      const label = cueLabel(x.ev, x.f);
       ctx.fillText(label.slice(0, Math.floor(bw / 7.5)), bx + 7, row.y + (row.h - 6) / 2);
     }
   });
@@ -1052,12 +1246,47 @@ function drawTimeline() {
     ctx.moveTo(px - 5, 2); ctx.lineTo(px + 5, 2); ctx.lineTo(px, 10);
     ctx.closePath(); ctx.fill();
   }
+
+  // SCROLLBAR ngang (CapCut-style) — chỉ hiện khi timeline dài hơn visibleDuration
+  const viewSecNow = (W - GUT) / state.pps;
+  if (viewSecNow > 0 && viewSecNow < dur) {
+    const trackY = H - 14, trackH = 10, trackW = W - GUT;
+    ctx.fillStyle = 'rgba(255,255,255,0.05)';
+    ctx.fillRect(GUT, trackY, trackW, trackH);
+    const tx = (state.viewStart / dur) * trackW;
+    const thumbW = Math.max(48, (viewSecNow / dur) * trackW);
+    const tw2 = Math.min(trackW - tx, thumbW);
+    ctx.fillStyle = 'rgba(255,255,255,0.32)';
+    ctx.fillRect(GUT + tx, trackY, Math.max(48, tw2), trackH);
+    sbThumb = { x1: GUT + tx, x2: GUT + tx + Math.max(48, tw2), trackW, y: trackY, h: trackH };
+  } else {
+    sbThumb = null;
+  }
 }
 
 /* Tương tác timeline */
-let dragInfo = null;      // pan / click
-let blockDrag = null;     // kéo khối cue: {fx, folder, grabDt, mouse:{x,y}}
+let dragInfo = null;      // pan / click / scrub
+let blockDrag = null;     // kéo khối cue
+let clipDrag = null;      // kéo khối nhạc trên lane A: {lane, startX, off0, moved}
+let sbThumb = null;       // scrollbar ngang vẽ trên canvas (CapCut-style)
+let sbDrag = null;        // đang kéo scrollbar: {grabOff, trackW}
 let mousePos = { x: -1, y: -1 };
+
+function audioClipHit(x, y) {
+  const row = hitLaneRow(y);
+  if (!row || !row.isAudio || !row.songId) return null;
+  const song = state.songs.find((s) => s.id === row.songId);
+  const laneObj = laneByName(row.lane);
+  if (!song) return null;
+  // chưa nạp xong độ dài → tạm coi dài 2 phút để CHỌN và KÉO được ngay sau khi thả
+  const dur = song.duration > 0 ? song.duration : (song.decoding ? 0 : 120);
+  if (!dur) return null;
+  const off = (laneObj && laneObj.songOffset) || 0;
+  const cx1 = (off - state.viewStart) * state.pps + GUT;
+  const cx2 = (off + dur - state.viewStart) * state.pps + GUT;
+  if (x >= cx1 && x <= cx2) return { row, song, laneObj, cx1, cx2 };
+  return null;
+}
 
 function hitLaneRow(y) {
   const rows = timelineRows();
@@ -1082,15 +1311,25 @@ canvas.addEventListener('mousedown', (e) => {
   const r = canvas.getBoundingClientRect();
   const x = e.clientX - r.left, y = e.clientY - r.top;
   mousePos = { x, y };
-  // nút × xóa lane trên gutter
-  if (x <= 18 && x >= 0) {
-    const row = hitLaneRow(y);
-    if (row) { removeLane(row.id); return; }
+  // SCROLLBAR ngang dưới cùng — kéo thumb để scroll, bấm track để nhảy tới
+  if (sbThumb && y >= sbThumb.y && y <= sbThumb.y + sbThumb.h && x >= GUT) {
+    const thumbW = sbThumb.x2 - sbThumb.x1;
+    const inThumb = x >= sbThumb.x1 && x <= sbThumb.x2;
+    sbDrag = { grabOff: inThumb ? (x - sbThumb.x1) : thumbW / 2, trackW: sbThumb.trackW };
+    if (!inThumb) {
+      state.viewStart = (((x - thumbW / 2) - GUT) / sbThumb.trackW) * totalSeconds();
+      clampView();
+    }
+    canvas.style.cursor = 'ew-resize';
+    return;
   }
-  // context menu để xóa lane (phím Shift + click)
-  if (e.button === 2 && x <= 18) {
+  // gutter bên trái: nút × (xóa lane) và 🔒 (khóa lane) — vùng bấm TO, dễ bấm
+  if (x >= 0 && x <= 50) {
     const row = hitLaneRow(y);
-    if (row) { removeLane(row.id); e.preventDefault(); return; }
+    if (row) {
+      if (x <= 28) { removeLane(row.id); return; }
+      toggleLaneLock(row.id); return;
+    }
   }
   // bấm vào thanh đò (playhead) → kéo ngang
   const px = frameToX(state.frame);
@@ -1099,25 +1338,34 @@ canvas.addEventListener('mousedown', (e) => {
     canvas.style.cursor = 'ew-resize';
     return;
   }
-  // bắt đầu kéo khối cue: mép = đổi độ dài (2 đầu), thân = dời
+  // bấm vào khối nhạc trên lane A → kéo ngang cả khối
+  const clip = audioClipHit(x, y);
+  if (clip) {
+    if (clip.laneObj && clip.laneObj.locked) { flashStatus(`Lane ${clip.row.lane} đang khóa.`); return; }
+    clipDrag = { lane: clip.laneObj, startX: x, off0: clip.laneObj.songOffset || 0, moved: false };
+    canvas.style.cursor = 'grabbing';
+    return;
+  }
+  // bắt đầu kéo khối cue: CHỈ mép 2 đầu = đổi độ dài, thân = dời (thời gian không đổi)
   const hit = hitCueBlock(x, y);
   if (hit && x >= GUT) {
     const f = state.folders.find((fo) => fo.events.includes(hit.fx.ev));
+    const locked = laneLockedByName(hit.row.lane);
     const x1 = frameToX(hit.fx.t);
     const x2 = frameToX(eventEndFrame(hit.fx));
-    let mode = 'move';
-    if (Math.abs(x - x2) <= 7) mode = 'resize-r';
-    else if (Math.abs(x - x1) <= 7 && eventEndFrame(hit.fx) - hit.fx.t > 2) mode = 'resize-l';
+    let mode = cueResizeMode(x, x1, x2) || 'move';
+    if (locked) mode = 'move'; // lane khóa: chỉ click chọn, không dời/đổi độ dài
     blockDrag = {
       ev: hit.fx.ev, folder: f, mode, mouse: { x, y }, moved: false,
-      copy: e.altKey,                  // Alt = kéo thả tạo bản sao
-      f0: hit.fx.t - f.offset,         // frame gốc (nếu Alt-copy thì trả lại cho cue gốc)
+      copy: e.altKey,                  // Alt = đặt thêm 1 điểm mới (cùng cue gốc)
+      locked,
+      f0: hit.fx.t - f.offset,
       dur0: hit.fx.ev.duration || 0,
-      grabF: xToFrame(x) - hit.fx.t,   // điểm nắm trong khối
+      grabF: xToFrame(x) - hit.fx.t,
       end0: eventEndFrame(hit.fx),
       lane0: hit.fx.ev.lane
     };
-    canvas.style.cursor = mode === 'move' ? 'grabbing' : 'ew-resize';
+    canvas.style.cursor = (mode === 'move' && !locked) ? 'grabbing' : (locked ? 'default' : 'ew-resize');
     return;
   }
   dragInfo = { x, y, moved: false, viewStart0: state.viewStart };
@@ -1126,7 +1374,21 @@ canvas.addEventListener('mousemove', (e) => {
   const r = canvas.getBoundingClientRect();
   const x = e.clientX - r.left, y = e.clientY - r.top;
   mousePos = { x, y };
+  if (sbDrag) {
+    // SCROLL ngang bằng scrollbar — chỉ đổi viewStart, không đổi dữ liệu
+    state.viewStart = clamp(((x - sbDrag.grabOff) - GUT) / sbDrag.trackW * totalSeconds(),
+      0, Math.max(0, totalSeconds() - visibleSec()));
+    return;
+  }
+  if (clipDrag) {
+    if (!clipDrag.moved && Math.abs(x - clipDrag.startX) > 3) clipDrag.moved = true;
+    if (clipDrag.moved && clipDrag.lane) {
+      clipDrag.lane.songOffset = Math.max(0, clipDrag.off0 + (x - clipDrag.startX) / state.pps);
+    }
+    return;
+  }
   if (blockDrag) {
+    if (blockDrag.locked) return; // lane khóa — không kéo
     if (!blockDrag.moved && (Math.abs(x - blockDrag.mouse.x) > 2 || Math.abs(y - blockDrag.mouse.y) > 2)) blockDrag.moved = true;
     if (blockDrag.moved) {
       // CẬP NHẬT NGAY khi kéo — mượt như edit video
@@ -1135,7 +1397,7 @@ canvas.addEventListener('mousemove', (e) => {
       if (blockDrag.mode === 'move') {
         ev.frame = Math.max(0, Math.round(xToFrame(x) - blockDrag.grabF) - blockDrag.folder.offset);
         const row = hitLaneRow(y);
-        if (row && !row.isAudio && row.lane !== ev.lane) ev.lane = row.lane;
+        if (row && !row.isAudio && row.lane !== ev.lane && !laneLockedByName(row.lane)) ev.lane = row.lane;
       } else if (blockDrag.mode === 'resize-r') {
         ev.duration = Math.max(1, Math.round(xToFrame(x)) - (entry ? entry.t : 0));
       } else { // resize-l
@@ -1147,15 +1409,21 @@ canvas.addEventListener('mousemove', (e) => {
     }
     return;
   }
-  // gợi ý con trỏ: thanh đò + mép cue = kéo ngang, thân cue = grab
+  // gợi ý con trỏ: thanh đò + mép cue + thân khối nhạc = kéo ngang, thân cue = grab
   if (!dragInfo) {
     const px = frameToX(state.frame);
     const hit = hitCueBlock(x, y);
+    const clip = audioClipHit(x, y);
     let cur = 'crosshair';
-    if (Math.abs(x - px) <= 8) cur = 'ew-resize';
-    else if (hit) {
+    // hover scrollbar → con trỏ kéo ngang
+    if (sbThumb && y >= sbThumb.y && y <= sbThumb.y + sbThumb.h && x >= GUT) cur = 'ew-resize';
+    else if (Math.abs(x - px) <= 8) cur = 'ew-resize';
+    else if (clip) {
+      const atEdge = Math.abs(x - clip.cx1) <= 7 || Math.abs(x - clip.cx2) <= 7;
+      cur = atEdge ? 'ew-resize' : 'grab';
+    } else if (hit) {
       const x1 = frameToX(hit.fx.t), x2 = frameToX(eventEndFrame(hit.fx));
-      cur = (Math.abs(x - x2) <= 7 || Math.abs(x - x1) <= 7) ? 'ew-resize' : 'grab';
+      cur = cueResizeMode(x, x1, x2) ? 'ew-resize' : (laneLockedByName(hit.row.lane) ? 'default' : 'grab');
     }
     canvas.style.cursor = cur;
     return;
@@ -1169,27 +1437,44 @@ canvas.addEventListener('mousemove', (e) => {
     state.viewStart = Math.max(0, dragInfo.viewStart0 - (x - dragInfo.x) / state.pps);
   }
 });
-canvas.addEventListener('mouseleave', () => { dragInfo = null; mousePos = { x: -1, y: -1 }; });
+canvas.addEventListener('mouseleave', () => { dragInfo = null; clipDrag = null; sbDrag = null; mousePos = { x: -1, y: -1 }; });
 canvas.addEventListener('mouseup', (e) => {
+  if (sbDrag) { sbDrag = null; canvas.style.cursor = 'crosshair'; return; }
+  if (clipDrag) {
+    if (clipDrag.moved) {
+      scheduleAutosave();
+      flashStatus(`Đã dời khối nhạc tới ${tcString(Math.round((clipDrag.lane.songOffset || 0) * state.fps), state.fps)}`);
+    } else {
+      // click đơn = CHỌN clip nhạc (dùng được Sao chép/Cắt/Dán/Xóa trên selbar)
+      state.selAudioLaneId = clipDrag.lane.id;
+      state.sel = null;
+      state.multiSel = new Set();
+      renderFolders();
+      renderProps();
+      updateSelBar();
+      flashStatus('Đã chọn clip nhạc — kéo thân để dời ngang, hoặc dùng Sao chép/Cắt/Dán/Xóa trên thanh công cụ.');
+    }
+    clipDrag = null;
+    canvas.style.cursor = 'crosshair';
+    return;
+  }
   if (blockDrag) {
     const ev = blockDrag.ev;
-    if (blockDrag.moved && blockDrag.folder) {
+    if (blockDrag.moved && blockDrag.folder && !blockDrag.locked) {
       const f = blockDrag.folder;
       if (blockDrag.copy && blockDrag.mode === 'move') {
-        // Alt = bản sao: cue gốc về chỗ cũ, bản mới ở vị trí đã kéo
-        const dup = makeCue(Math.max(0, ev.frame), ev.address, JSON.parse(JSON.stringify(ev.args || [1])));
-        dup.name = ev.name; dup.duration = ev.duration || 0;
-        dup.note = ev.note || ''; dup.color = ev.color || '';
-        dup.mode = ev.mode || 'trigger'; dup.lane = ev.lane;
+        // Alt = đặt thêm 1 ĐIỂM ĐẶT mới (cùng cue gốc) — cue gốc trở về chỗ cũ
+        const dup = makePlacement(Math.max(0, ev.frame), ev.cueId);
+        dup.lane = ev.lane; dup.duration = ev.duration || 0; dup.enabled = ev.enabled !== false;
         insertCue(f, dup);
         ev.frame = blockDrag.f0;
         ev.lane = blockDrag.lane0;
-        ev.duration = blockDrag.dur0 !== undefined ? blockDrag.dur0 : ev.duration;
+        ev.duration = blockDrag.dur0 || 0;
         state.sel = dup;
         state.multiSel = new Set([dup]);
         refreshAll();
         renderProps();
-        flashStatus(`Đã tạo bản sao tại ${tcString(f.offset + dup.frame, state.fps)} trên ${dup.lane}`);
+        flashStatus(`Đã đặt thêm 1 điểm tại ${tcString(f.offset + dup.frame, state.fps)} trên ${dup.lane}`);
       } else {
         const i = f.events.indexOf(ev);
         if (i >= 0) f.events.splice(i, 1);
@@ -1204,6 +1489,7 @@ canvas.addEventListener('mouseup', (e) => {
       }
     } else if (!blockDrag.moved) {
       // click chọn cue (⌘/Ctrl = thêm/bỏ khỏi vùng chọn)
+      state.selAudioLaneId = null;
       if (e.metaKey || e.ctrlKey) {
         if (state.multiSel.has(ev)) state.multiSel.delete(ev);
         else state.multiSel.add(ev);
@@ -1228,12 +1514,14 @@ canvas.addEventListener('mouseup', (e) => {
   if (dragInfo.mode === 'scrub') { dragInfo = null; return; }
   if (!dragInfo.moved && x >= GUT) {
     const row = hitLaneRow(y);
-    if (row && row.isAudio) {
-      // bấm lane A có nhạc → lấy bài đó làm mốc thời gian
-      const si = state.songs.findIndex((s) => s.id === row.songId);
-      if (si >= 0) activateSong(si);
+    if (row && row.isAudio && row.songId) {
+      // click nền lane A (ngoài clip) → bỏ chọn
+      state.selAudioLaneId = null;
+      updateSelBar();
     } else {
       state.sel = null;
+      state.selAudioLaneId = null;
+      updateSelBar();
       renderFolders();
       renderProps();
       setFrame(Math.round(xToFrame(x)));
@@ -1241,25 +1529,50 @@ canvas.addEventListener('mouseup', (e) => {
   }
   dragInfo = null;
 });
+
+// nhấp đúp clip nhạc → lấy bài đó làm mốc thời gian (đồng hồ show)
+canvas.addEventListener('dblclick', (e) => {
+  const r = canvas.getBoundingClientRect();
+  const clip = audioClipHit(e.clientX - r.left, e.clientY - r.top);
+  if (clip) {
+    const si = state.songs.findIndex((s) => s.id === clip.row.songId);
+    if (si >= 0) { activateSong(si); flashStatus(`Đã lấy "${state.songs[si].name}" làm mốc thời gian.`); }
+  }
+});
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
-  const r = canvas.getBoundingClientRect();
-  const x = e.clientX - r.left;
-  const anchorSec = (x - GUT) / state.pps + state.viewStart;
-  const factor = e.deltaY < 0 ? 1.25 : 1 / 1.25;
-  state.pps = clamp(state.pps * factor, 2, 600);
-  state.viewStart = Math.max(0, anchorSec - (x - GUT) / state.pps);
+  if (!state.pps) return;
+  if (e.ctrlKey) {
+    // ZOOM CapCut-style: neo đúng vị trí con trỏ, playhead/dữ liệu KHÔNG đổi
+    const r = canvas.getBoundingClientRect();
+    const x = e.clientX - r.left;
+    const anchorSec = (x - GUT) / state.pps + state.viewStart;
+    applyZoom(state.pps * Math.exp(-e.deltaY * 0.01), anchorSec);   // chậm, mượt
+    return;
+  }
+  const dx = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : (e.shiftKey && e.deltaY ? e.deltaY : 0);
+  if (dx) {
+    // SCROLL NGANG (2 ngón trái/phải, Shift + cuộn) — chỉ đổi viewStart
+    state.viewStart = Math.max(0, state.viewStart + (dx / state.pps) * 0.6);
+    clampView();
+    return;
+  }
+  // 2 ngón đẩy LÊN/XUỒNG → KHÔNG làm gì (không tự zoom)
 }, { passive: false });
 
-/* Thả vào timeline: bài hát (gắn vào lane A) hoặc cue (đặt thời điểm + lane) */
-setupDrop(canvas, true);
+/* Thả vào timeline: bài hát (gắn vào lane A, clip bắt đầu tại điểm thả) hoặc cue (đặt thời điểm + lane) */
+setupDrop(canvas, false);
 canvas.__onSongDrop = (songId, e) => {
   const r = canvas.getBoundingClientRect();
+  const x = e.clientX - r.left;
   const row = hitLaneRow(e.clientY - r.top);
   if (row && row.isAudio) {
     row.songId = songId; // gắn bài vào đúng lane A bị thả
     const lane = laneById(row.id);
-    if (lane) lane.songId = songId;
+    if (lane) {
+      lane.songId = songId;
+      lane.songOffset = Math.max(0, state.viewStart + (x - GUT) / state.pps); // clip bắt đầu tại chỗ thả
+    }
     scheduleAutosave();
   }
 };
@@ -1271,33 +1584,24 @@ canvas.addEventListener('drop', (e) => {
   if (cid && !sid) {
     e.preventDefault();
     e.stopPropagation();
-    const [fid, ceid, isCopy] = cid.split(':').map(Number);
-    const srcF = state.folders.find((fo) => fo.id === fid);
-    const src = srcF && srcF.events.find((c) => c.id === ceid);
-    if (src && srcF) {
+    const [fid, defId] = cid.split(':').map(Number);
+    const f = state.folders.find((fo) => fo.id === fid);
+    const def = f && f.cues.find((c) => c.id === defId);
+    if (def && f) {
       const row = hitLaneRow(y);
-      // thả từ DANH SÁCH CUE hoặc giữ Alt = tạo bản sao — cue gốc giữ nguyên, kéo được nhiều lần
-      const wantCopy = isCopy === 1 || e.altKey;
-      let target = srcF;
-      let cue = src;
-      if (wantCopy) {
-        cue = makeCue(0, src.address, JSON.parse(JSON.stringify(src.args || [1])));
-        cue.name = src.name; cue.duration = src.duration || 0;
-        cue.note = src.note || ''; cue.color = src.color || '';
-        cue.mode = src.mode || 'trigger'; cue.lane = src.lane;
-      } else {
-        const i = target.events.indexOf(src);
-        if (i >= 0) target.events.splice(i, 1);
-      }
-      cue.frame = Math.max(0, Math.round(xToFrame(x)) - target.offset);
+      if (row && laneLockedByName(row.lane)) { flashStatus(`Lane ${row.lane} đang khóa — mở khóa để đặt cue.`); return; }
+      // thả cue gốc vào timeline = ĐIỂM ĐẶT mới, mặc định dài 3 giây
+      const cue = makePlacement(0, def.id);
+      cue.duration = 3 * state.fps;
+      cue.frame = Math.max(0, Math.round(xToFrame(x)) - f.offset);
       if (row && !row.isAudio) cue.lane = row.lane;
-      insertCue(target, cue);
+      insertCue(f, cue);
       state.sel = cue;
       state.multiSel = new Set([cue]);
       updateSelBar();
       refreshAll();
       renderProps();
-      flashStatus(`Đã đặt cue tại ${tcString(target.offset + cue.frame, state.fps)} trên ${cue.lane}${wantCopy ? ' (bản sao)' : ''}`);
+      flashStatus(`Đã đặt cue "${cueLabel(cue, f)}" tại ${tcString(f.offset + cue.frame, state.fps)} trên ${cue.lane}`);
     }
     return;
   }
@@ -1309,7 +1613,10 @@ canvas.addEventListener('drop', (e) => {
       if (row && row.isAudio) {
         row.songId = state.songs[i].id;
         const lane = laneById(row.id);
-        if (lane) lane.songId = state.songs[i].id;
+        if (lane) {
+          lane.songId = state.songs[i].id;
+          lane.songOffset = Math.max(0, state.viewStart + (x - GUT) / state.pps);
+        }
         scheduleAutosave();
         flashStatus(`Đã gắn "${state.songs[i].name}" vào lane ${row.lane}`);
       }
@@ -1360,7 +1667,7 @@ drawTimeline = function () {
       const x1 = frameToX(t);
       const bw = Math.max(4, frameToX(t + dur) - x1);
       ctx.globalAlpha = 0.75;
-      ctx.fillStyle = cueColor(blockDrag.ev, null, blockDrag.folder);
+      ctx.fillStyle = cueColor(blockDrag.ev, blockDrag.folder);
       ctx.fillRect(x1, row.y + 2, bw, row.h - 10);
       ctx.globalAlpha = 1;
       ctx.strokeStyle = '#fff';
@@ -1382,47 +1689,81 @@ drawTimeline = function () {
   }
 };
 
-$('btnZoomIn').addEventListener('click', () => { state.pps = clamp(state.pps * 1.3, 2, 600); });
-$('btnZoomOut').addEventListener('click', () => { state.pps = clamp(state.pps / 1.3, 2, 600); });
+$('btnZoomIn').addEventListener('click', () => zoomPps(1.3));
+$('btnZoomOut').addEventListener('click', () => zoomPps(1 / 1.3));
 
 /* ================= Vòng lặp chính ================= */
 let lastT = null;
 let lastInfoFrame = -1;
+let infoDirty = true;   // cần tính lại HIỆN TẠI/CUE TIẾP/CÒN LẠI (sau khi thêm/xóa nhạc, cue…)
 function tick(t) {
   if (state.playing) {
-    if (mode() === 'audio') {
-      state.frame = audio.currentTime * state.fps;
-    } else if (lastT != null) {
-      state.frame += ((t - lastT) / 1000) * state.fps * state.speed;
+    // ÂM THANH THEO CLIP: bài nào đang nằm dưới playhead trên lane A thì phát bài đó
+    const clip = findClipAtFrame(state.frame);
+    if (clip && !audio.ended) {
+      if (audioSongId !== clip.song.id) {
+        audio.src = 'file://' + encodeURI(clip.song.path);
+        audioSongId = clip.song.id;
+        audio.playbackRate = state.speed;
+      }
+      const local = state.frame / state.fps - clip.offset;
+      if (Math.abs(audio.currentTime - local) > 0.3) {
+        audio.currentTime = clamp(local, 0, Math.max(0, clip.song.duration - 0.02));
+      }
+      if (audio.paused) audio.play().catch(() => {});
+      state.frame = (clip.offset + audio.currentTime) * state.fps;
+    } else {
+      // ngoài clip (hoặc clip đã chạy hết): im tiếng, playhead vẫn chạy
+      if (!audio.paused) audio.pause();
+      if (lastT != null) state.frame += ((t - lastT) / 1000) * state.fps * state.speed;
     }
     fireDue();
     if (state.frame >= totalFrames()) atEndReached();
     updateTc();
   }
-  if (Math.floor(state.frame) !== lastInfoFrame) {
+  if (Math.floor(state.frame) !== lastInfoFrame || infoDirty) {
     lastInfoFrame = Math.floor(state.frame);
+    infoDirty = false;
     updateInfoStrip();
   }
+  if (state.pps) { const pr = $('ppsRange'); if (pr) pr.value = ppsToSlider(state.pps); }
   lastT = t;
   drawTimeline();
   requestAnimationFrame(tick);
 }
 
-/* Dải HIỆN TẠI / CUE TIẾP THEO / CÒN LẠI */
+/* Dải HIỆN TẠI / CUE TIẾP THEO / CÒN LẠI (của thư mục đang chọn) */
 function updateInfoStrip() {
   $('infoCur').textContent = tcString(state.frame, state.fps);
   const nx = nextCue();
   if (nx) {
-    $('infoNext').textContent = tcString(nx.t, state.fps);
-    const fname = nx.f.name && nx.f.name !== 'Chính' ? `${nx.f.name}: ` : '';
-    $('infoNextName').textContent = fname + (nx.ev.name || nx.ev.address);
-    $('infoRem').textContent = tcString(Math.max(0, nx.t - state.frame), state.fps);
+    // ĐẾM NGƯỢC: còn bao lâu nữa cue bắn ra
+    $('infoNext').textContent = tcString(Math.max(0, nx.t - state.frame), state.fps);
+    const fname = nx.f.name ? `${nx.f.name}: ` : '';
+    $('infoNextName').textContent = fname + cueLabel(nx.ev, nx.f) + ' @ ' + tcString(nx.t, state.fps);
   } else {
     $('infoNext').textContent = '--:--:--:--';
     $('infoNextName').textContent = 'không còn cue nào';
-    const rem = totalFrames() - state.frame;
-    $('infoRem').textContent = tcString(Math.max(0, rem), state.fps);
   }
+  // CÒN LẠI = điểm NGOÀI CÙNG của timeline: max(cuối clip nhạc trên lane A, cue cuối cùng)
+  let endFrame = 0;
+  state.lanes.forEach((l) => {
+    if (l.kind !== 'A' || !l.songId) return;
+    const s = state.songs.find((x) => x.id === l.songId);
+    if (s && s.duration > 0) {
+      const end = ((l.songOffset || 0) + s.duration) * state.fps;
+      if (end > endFrame) endFrame = end;
+    }
+  });
+  const f = curFolder();
+  const pool = (state.showAllFolders || !f) ? flat : flat.filter((x) => x.f === f);
+  pool.forEach((x) => {
+    const end = x.t + (x.ev.duration || 0);
+    if (end > endFrame) endFrame = end;
+  });
+  $('infoRem').textContent = endFrame > 0
+    ? tcString(Math.max(0, endFrame - state.frame), state.fps)
+    : '--:--:--:--';
 }
 requestAnimationFrame(tick);
 
@@ -1435,7 +1776,11 @@ audio.addEventListener('loadedmetadata', () => {
     scheduleAutosave();
   }
 });
-audio.addEventListener('ended', () => { if (state.playing) atEndReached(); });
+audio.addEventListener('ended', () => {
+  // KHÔNG dừng timeline khi bài hát phát xong — tick() tự im tiếng và playhead chạy tiếp
+  // theo tổng chiều dài timeline (cue có thể dài hơn âm thanh)
+  if (!audio.paused) audio.pause();
+});
 
 /* ================= UI ================= */
 function updateTc() { $('tcText').textContent = tcString(state.frame, state.fps); }
@@ -1519,9 +1864,9 @@ function renderOscSeen() {
       const args = [...item.args.keys()].slice(0, 1)[0];
       const parsed = parseOscArgs(args);
       let f = curFolder();
-      if (!f) f = addFolder('Chính');
-      const cue = makeCue(Math.floor(state.frame) - f.offset, addr, parsed);
-      cue.name = addr.split('/').filter(Boolean).slice(-1)[0] || 'Cue';
+      if (!f) f = addFolder();
+      const def = findOrMakeDef(f, addr, parsed);
+      const cue = makePlacement(Math.floor(state.frame) - f.offset, def.id);
       const rl = recLane();
       cue.lane = rl ? rl.name : 'V1';
       insertCue(f, cue);
@@ -1583,16 +1928,18 @@ $('monFilter').addEventListener('input', (e) => {
 
 /* ================= Menu bar ================= */
 const menuActions = {
+  new: () => newProjectDialog(),
   open: () => openProjectDialog(),
   save: () => saveProjectDialog(),
+  saveas: () => saveProjectAsDialog(),
   undo, redo,
   cut: cutSelection,
   copy: copySelection,
   paste: () => pasteSelection(),
   hide: toggleHideSelection,
   'delete': () => deleteSelection(),
-  zoomin: () => { state.pps = clamp(state.pps * 1.3, 2, 600); },
-  zoomout: () => { state.pps = clamp(state.pps / 1.3, 2, 600); },
+  zoomin: () => zoomPps(1.3),
+  zoomout: () => zoomPps(1 / 1.3),
   home: () => setFrame(0),
   follow: () => { $('followChk').checked = !$('followChk').checked; state.follow = $('followChk').checked; flashStatus('Theo thanh đò: ' + (state.follow ? 'BẬT' : 'TẮT')); },
   help: () => flashStatus('Quy trình: ① Bật Output trong Resolume (Preferences → OSC → 127.0.0.1:7000) ② Kéo nhạc vào lane A ③ Bật REC, Phát, gõ MIDI ④ Dừng REC, Play lại để chạy show. ⌘-click chọn nhiều cue. Kéo cue từ danh sách vào timeline = tạo bản sao (giữ Alt khi kéo trên timeline cũng vậy).'),
@@ -1623,12 +1970,12 @@ $('btnOscToCues').addEventListener('click', () => {
   if (!OSC_SEEN.size) { setStatus('Chưa có OSC nào được nhận.'); return; }
   let created = 0;
   const entries = [...OSC_SEEN.entries()];
+  let f = curFolder();
+  if (!f) f = addFolder();
   entries.forEach(([addr, item]) => {
     const args = parseOscArgs([...item.args.keys()][0]);
-    let f = curFolder();
-    if (!f) f = addFolder('Chính');
-    const cue = makeCue(Math.floor(state.frame) - f.offset, addr, args);
-    cue.name = addr.split('/').filter(Boolean).slice(-1)[0] || 'Cue';
+    const def = findOrMakeDef(f, addr, args);
+    const cue = makePlacement(Math.floor(state.frame) - f.offset, def.id);
     const rl = recLane();
     cue.lane = rl ? rl.name : 'V1';
     insertCue(f, cue);
@@ -1655,7 +2002,7 @@ $('btnRec').addEventListener('click', () => {
   updateTransport();
   if (state.recArmed) {
     const f = curFolder();
-    if (!f) { addFolder('Chính'); }
+    if (!f) { addFolder(); }
     if (!state.playing) play();
     flashStatus(`REC BẬT — ghi vào thư mục "${(f || curFolder()).name}". Gõ MIDI vào Resolume ngay.`);
   } else {
@@ -1699,13 +2046,13 @@ $('mrDedupe').addEventListener('click', () => {
   const seen = new Set();
   const before = f.events.length;
   f.events = f.events.filter((ev) => {
-    const key = `${ev.frame}|${ev.address}|${JSON.stringify(ev.args)}`;
+    const key = `${ev.frame}|${ev.lane}|${ev.cueId}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
   refreshAll();
-  flashStatus(`Dọn trùng: đã bỏ ${before - f.events.length} cue trùng.`);
+  flashStatus(`Dọn trùng: đã bỏ ${before - f.events.length} điểm đặt trùng.`);
 });
 $('mrMonitor').addEventListener('click', () => {
   $('monHead').scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -1728,15 +2075,15 @@ $('vol').addEventListener('input', (e) => { audio.volume = parseFloat(e.target.v
 
 $('btnAddCue').addEventListener('click', () => {
   let f = curFolder();
-  if (!f) f = addFolder('Chính');
-  const addr = $('testAddr').value.trim() || '/composition/layers/1/clips/1/connect';
-  const cue = makeCue(Math.floor(state.frame) - f.offset, addr, [1]);
-  cue.name = 'Cue mới';
-  insertCue(f, cue);
-  state.sel = cue;
-  refreshAll();
-  renderProps();
-  flashStatus(`Đã thêm cue rỗng @ ${tcString(state.frame, state.fps)} — chỉnh chi tiết ở THUỘC TÍNH CUE bên dưới.`);
+  if (!f) f = addFolder();
+  // chỉ tạo CUE GỐC trong danh sách — lên timeline chỉ khi kéo thả vào lane
+  const def = makeDef('', [1]);
+  def.name = 'Cue ' + (f.cues.length + 1);
+  def.color = SWATCHES[(f.cues.length * 5) % SWATCHES.length];
+  f.cues.push(def);
+  renderFolders();
+  scheduleAutosave();
+  flashStatus(`Đã tạo "${def.name}" — điền ĐỊA CHỈ OSC, rồi KÉO vào timeline để đặt (mặc định 3 giây).`);
 });
 $('btnAddFolder').addEventListener('click', () => addFolder());
 
@@ -1749,8 +2096,13 @@ function selSet() {
 
 function updateSelBar() {
   const n = selSet().size;
-  $('selCount').textContent = `${n} đã chọn`;
-  $('selBar').style.display = n ? 'flex' : 'none';
+  const audio = state.selAudioLaneId ? 1 : 0;
+  $('selCount').textContent = audio ? '1 clip nhạc' : `${n} đã chọn`;
+  $('selBar').style.display = (n || audio) ? 'flex' : 'none';
+}
+
+function selAudioLane() {
+  return state.selAudioLaneId ? laneById(state.selAudioLaneId) : null;
 }
 
 function findCueLoc(ev) {
@@ -1762,6 +2114,14 @@ function findCueLoc(ev) {
 }
 
 function copySelection() {
+  // clip nhạc trên lane A
+  const al = selAudioLane();
+  if (al) {
+    if (!al.songId) { setStatus('Lane này chưa gắn nhạc.'); return false; }
+    state.clipboardAudio = { songId: al.songId, offset: al.songOffset || 0 };
+    flashStatus('Đã sao chép clip nhạc.');
+    return true;
+  }
   const set = selSet();
   if (!set.size) { setStatus('Chưa chọn cue nào.'); return false; }
   const items = [...set].map((ev) => JSON.parse(JSON.stringify(ev)));
@@ -1773,37 +2133,36 @@ function copySelection() {
 }
 
 function cutSelection() {
+  const al = selAudioLane();
+  if (al) {
+    if (!copySelection()) return;
+    al.songId = null;
+    al.songOffset = 0;
+    state.selAudioLaneId = null;
+    refreshAll();
+    renderProps();
+    updateSelBar();
+    flashStatus('Đã cắt clip nhạc — Dán để đặt lại tại thanh đò.');
+    return;
+  }
   if (!copySelection()) return;
   deleteSelection(false);
   flashStatus(`Đã cắt — nhấn Dán để đặt tại thanh đò.`);
 }
 
-function pasteSelection(atFrame) {
-  const items = state.clipboardMulti || (state.clipboard ? [state.clipboard] : null);
-  if (!items || !items.length) { setStatus('Chưa có cue nào trong bộ nhớ.'); return; }
-  let f = curFolder();
-  if (!f) f = addFolder('Chính');
-  const base = Math.floor(atFrame !== undefined ? atFrame : state.frame) - f.offset;
-  const base0 = items[0].frame;
-  const newSel = new Set();
-  items.forEach((src) => {
-    const cue = makeCue(Math.max(0, base + (src.frame - base0)), src.address, JSON.parse(JSON.stringify(src.args || [1])));
-    cue.name = src.name || ''; cue.duration = src.duration || 0;
-    cue.note = src.note || ''; cue.color = src.color || '';
-    cue.mode = src.mode || 'trigger'; cue.lane = src.lane || cue.lane;
-    if (!laneByName(cue.lane)) cue.lane = state.lanes[0].name;
-    insertCue(f, cue);
-    newSel.add(cue);
-  });
-  state.multiSel = newSel;
-  state.sel = [...newSel].slice(-1)[0];
-  refreshAll();
-  renderProps();
-  updateSelBar();
-  flashStatus(`Đã dán ${items.length} cue @ ${tcString(state.frame, state.fps)}.`);
-}
-
 function deleteSelection(notify = true) {
+  // xóa clip nhạc đang chọn (gỡ khỏi lane, bài vẫn còn trong danh sách NHÁC)
+  const al = selAudioLane();
+  if (al) {
+    al.songId = null;
+    al.songOffset = 0;
+    state.selAudioLaneId = null;
+    refreshAll();
+    renderProps();
+    updateSelBar();
+    if (notify) flashStatus('Đã gỡ clip nhạc khỏi lane.');
+    return;
+  }
   const set = selSet();
   if (!set.size) return;
   set.forEach((ev) => {
@@ -1816,6 +2175,54 @@ function deleteSelection(notify = true) {
   renderProps();
   updateSelBar();
   if (notify) flashStatus('Đã xóa cue.');
+}
+
+function pasteSelection(atFrame) {
+  // dán clip nhạc: vào lane A đang chọn (hoặc lane A trống đầu tiên) tại thanh đò
+  if (state.clipboardAudio && !selSet().size) {
+    let lane = selAudioLane() || state.lanes.find((l) => l.kind === 'A' && !l.locked && !l.songId);
+    if (!lane) lane = state.lanes.find((l) => l.kind === 'A' && !l.locked);
+    if (!lane) { setStatus('Chưa có lane A — bấm ＋ A trên timeline.'); return; }
+    lane.songId = state.clipboardAudio.songId;
+    lane.songOffset = Math.max(0, state.frame / state.fps);
+    const song = state.songs.find((s) => s.id === lane.songId);
+    scheduleAutosave();
+    flashStatus(`Đã dán clip "${song ? song.name : '?'}" vào lane ${lane.name} @ ${tcString(state.frame, state.fps)}.`);
+    return;
+  }
+  const items = state.clipboardMulti || (state.clipboard ? [state.clipboard] : null);
+  if (!items || !items.length) { setStatus('Chưa có cue nào trong bộ nhớ.'); return; }
+  let f = curFolder();
+  if (!f) f = addFolder();
+  const base = Math.floor(atFrame !== undefined ? atFrame : state.frame) - f.offset;
+  const base0 = items[0].frame;
+  const newSel = new Set();
+  items.forEach((src) => {
+    // dán = điểm đặt mới, dùng lại cue gốc (cueId) đã có trong thư mục đích nếu trùng nguồn
+    let defId = src.cueId;
+    if (!f.cues.some((c) => c.id === defId)) {
+      // cue gốc ở thư mục khác → tạo bản def tương ứng trong thư mục đích
+      const srcF = state.folders.find((fo) => fo.cues.some((c) => c.id === src.cueId));
+      const sd = srcF && srcF.cues.find((c) => c.id === src.cueId);
+      if (!sd) return;
+      const nd = findOrMakeDef(f, sd.address, sd.args);
+      nd.name = sd.name; nd.color = sd.color; nd.note = sd.note; nd.mode = sd.mode;
+      defId = nd.id;
+    }
+    const cue = makePlacement(Math.max(0, base + (src.frame - base0)), defId);
+    cue.lane = src.lane || cue.lane;
+    cue.duration = src.duration || 0;
+    cue.enabled = src.enabled !== false;
+    if (!laneByName(cue.lane)) cue.lane = state.lanes[0].name;
+    insertCue(f, cue);
+    newSel.add(cue);
+  });
+  state.multiSel = newSel;
+  state.sel = [...newSel].slice(-1)[0];
+  refreshAll();
+  renderProps();
+  updateSelBar();
+  flashStatus(`Đã dán ${items.length} cue @ ${tcString(state.frame, state.fps)}.`);
 }
 
 function toggleHideSelection() {
@@ -1927,7 +2334,7 @@ $('btnTestSend').addEventListener('click', () => {
   sendOsc(addr, args);
 });
 
-setupDrop($('audioDrop'), true);
+setupDrop($('audioDrop'), false); // kéo nhạc vào KHÔNG tự phát — đứng im cho bạn sửa
 
 /* OSC từ main process */
 window.hs.onOsc(onOscMessage);
@@ -2070,19 +2477,13 @@ $('toFilterType').addEventListener('change', (e) => { TEST_OSC.type = e.target.v
     document.addEventListener('mouseup', mu);
   });
 
-  // thanh trượt RỘNG: zoom ngang toàn timeline (đi cùng nút +/− và cuộn chuột)
+  // thanh trượt RỘNG: zoom CapCut-style — neo tại playhead/giữa vùng nhìn, đụng pixelsPerSecond thôi
   const ppsRange = $('ppsRange');
-  function ppsFromSlider(v) { return 2 * Math.pow(300, v / 100); } // 2 → 600 px/s
-  function sliderFromPps(p) { return Math.round((Math.log(p / 2) / Math.log(300)) * 100); }
   ppsRange.addEventListener('input', () => {
-    state.pps = ppsFromSlider(Number(ppsRange.value));
+    if (!state.pps) state.pps = (canvas.clientWidth - GUT - 12) / TL_MIN_SEC;
+    applyZoom(sliderToPps(Number(ppsRange.value)));
     state.ppsInit = true;
   });
-  // phản ánh zoom khi cuộn chuột/nút +/−
-  const syncPps = () => { ppsRange.value = sliderFromPps(clamp(state.pps, 2, 600)); };
-  $('btnZoomIn').addEventListener('click', syncPps);
-  $('btnZoomOut').addEventListener('click', syncPps);
-  setTimeout(syncPps, 300);
 
   // thanh trượt CAO: chiều cao lane toàn bộ layer (V/R; lane A tỉ lệ 1.6×)
   $('rowHRange').addEventListener('input', (e) => {
@@ -2104,21 +2505,32 @@ function findSelectedFolder() {
   return state.folders.find((f) => f.events.includes(state.sel)) || null;
 }
 
+function selDef() {
+  const f = findSelectedFolder();
+  if (!f || !state.sel) return null;
+  return f.cues.find((c) => c.id === state.sel.cueId) || null;
+}
+
 function renderProps() {
   const ev = state.sel;
   $('propsEmptyHint').style.display = ev ? 'none' : '';
   $('propsBody').style.display = ev ? '' : 'none';
   if (!ev) return;
   const f = findSelectedFolder();
-  $('pName').value = ev.name || '';
+  const d = selDef();
+  $('pName').value = (d && d.name) || '';
   $('pTime').value = tcString(f ? f.offset + ev.frame : ev.frame, state.fps);
   $('pDur').value = ev.duration > 0 ? tcString(ev.duration, state.fps) : '';
-  $('pAddr').value = ev.address;
-  $('pArgs').value = (ev.args || []).join(', ');
-  $('pNote').value = ev.note || '';
-  $('pEnabled').checked = ev.enabled !== false;
+  $('pAddr').value = (d && d.address) || '';
+  $('pArgs').value = d ? (d.args || []).join(', ') : '';
+  $('pNote').value = (d && d.note) || '';
+  const laneObj = laneByName(ev.lane);
+  const pHideBtn = $('pHideBtn');
+  pHideBtn.classList.toggle('active', ev.enabled === false);
+  pHideBtn.textContent = ev.enabled === false ? '⊘ ĐANG ẨN — bấm để HIỆN LẠI' : '⊘ ẨN CLIP — KHÔNG GỬI QUA OSC';
+  pHideBtn.disabled = !!(laneObj && laneObj.locked);
   ['Trigger', 'Piano', 'Float'].forEach((m) => {
-    $('pMode' + m).classList.toggle('active', (ev.mode || 'trigger') === m.toLowerCase());
+    $('pMode' + m).classList.toggle('active', d && (d.mode || 'trigger') === m.toLowerCase());
   });
   renderSwatches();
 }
@@ -2126,14 +2538,15 @@ function renderProps() {
 function renderSwatches() {
   const box = $('pSwatches');
   box.innerHTML = '';
-  if (!state.sel) return;
+  const d = selDef();
+  if (!d) return;
   SWATCHES.forEach((c) => {
     const b = document.createElement('button');
-    b.className = 'swatch' + (state.sel.color === c ? ' sel' : '');
+    b.className = 'swatch' + (d.color === c ? ' sel' : '');
     b.style.background = c;
     b.title = c;
     b.addEventListener('click', () => {
-      state.sel.color = state.sel.color === c ? '' : c;
+      d.color = d.color === c ? '' : c;
       renderProps();
       renderFolders();
       scheduleAutosave();
@@ -2142,11 +2555,17 @@ function renderSwatches() {
   });
 }
 
-$('pName').addEventListener('input', (e) => { if (state.sel) { state.sel.name = e.target.value; renderFolders(); scheduleAutosave(); } });
+/* TÊN / ĐỊA CHỈ / THAM SỐ / GHI CHÚ / MÀU / CHẾ ĐỘ sửa trên CUE GỐC — chỉ đổi thuộc tính, không sinh cue mới */
+$('pName').addEventListener('input', (e) => {
+  const d = selDef();
+  if (d) { d.name = e.target.value; renderFolders(); scheduleAutosave(); }
+});
 $('pTime').addEventListener('change', () => {
   const f = findSelectedFolder();
   const v = parseTC($('pTime').value, state.fps);
   if (state.sel && v !== null && f) {
+    const laneObj = laneByName(state.sel.lane);
+    if (laneObj && laneObj.locked) { flashStatus(`Lane ${state.sel.lane} đang khóa.`); renderProps(); return; }
     const i = f.events.indexOf(state.sel);
     f.events.splice(i, 1);
     state.sel.frame = v - f.offset;
@@ -2158,39 +2577,59 @@ $('pTime').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.
 $('pDur').addEventListener('change', () => {
   const v = parseTC($('pDur').value, state.fps);
   if (state.sel) {
+    const laneObj = laneByName(state.sel.lane);
+    if (laneObj && laneObj.locked) { flashStatus(`Lane ${state.sel.lane} đang khóa.`); renderProps(); return; }
     state.sel.duration = v === null || v <= 0 ? 0 : v;
+    infoDirty = true;
     scheduleAutosave();
   }
 });
 $('pDur').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
 $('pAddr').addEventListener('change', () => {
+  const d = selDef();
   const v = $('pAddr').value.trim();
-  if (state.sel && v.startsWith('/')) {
-    state.sel.address = v;
-    state.sel.lane = laneOf(v);
-    refreshAll();
+  if (!d) return;
+  if (v.startsWith('/')) {
+    d.address = v; // chỉ sửa thuộc tính — điểm đặt trên timeline giữ nguyên vị trí
+    renderFolders();
+    scheduleAutosave();
+  } else {
+    flashStatus('Địa chỉ OSC phải bắt đầu bằng "/" — ví dụ /composition/layers/4/clips/1/connect');
+    renderProps(); // trả về địa chỉ cũ
   }
 });
 $('pArgs').addEventListener('change', () => {
-  if (!state.sel) return;
-  state.sel.args = $('pArgs').value.split(',').map((s) => s.trim()).filter((s) => s !== '')
+  const d = selDef();
+  if (!d) return;
+  d.args = $('pArgs').value.split(',').map((s) => s.trim()).filter((s) => s !== '')
     .map((s) => (!isNaN(Number(s)) ? Number(s) : s));
   scheduleAutosave();
 });
-$('pNote').addEventListener('input', (e) => { if (state.sel) { state.sel.note = e.target.value; scheduleAutosave(); } });
-$('pEnabled').addEventListener('change', (e) => {
-  if (state.sel) { state.sel.enabled = e.target.checked; renderFolders(); scheduleAutosave(); }
+$('pNote').addEventListener('input', (e) => {
+  const d = selDef();
+  if (d) { d.note = e.target.value; scheduleAutosave(); }
+});
+$('pHideBtn').addEventListener('click', () => {
+  if (!state.sel) return;
+  state.sel.enabled = state.sel.enabled === false; // đảo: đang ẩn → hiện, đang hiện → ẩn
+  refreshAll();
+  renderProps();
+  scheduleAutosave();
+  flashStatus(state.sel.enabled === false ? 'Đã ẨN clip — mờ + sọc, không gửi OSC khi phát.' : 'Đã hiện lại clip.');
 });
 ['Trigger', 'Piano', 'Float'].forEach((m) => {
   $('pMode' + m).addEventListener('click', () => {
-    if (state.sel) { state.sel.mode = m.toLowerCase(); renderProps(); scheduleAutosave(); }
+    const d = selDef();
+    if (d) { d.mode = m.toLowerCase(); renderProps(); scheduleAutosave(); }
   });
 });
 $('pDelete').addEventListener('click', () => { deleteSelected(); renderProps(); });
 $('pPlayNow').addEventListener('click', () => {
-  if (!state.sel) return;
-  sendOsc(state.sel.address, state.sel.args);
-  flashStatus(`Đã gửi ngay: ${state.sel.address}`);
+  const d = selDef();
+  if (!d) return;
+  if (!d.address) { setStatus('Cue chưa có địa chỉ OSC — điền ĐỊA CHỈ OSC ở trên trước.'); return; }
+  sendOsc(d.address, d.args);
+  flashStatus(`Đã gửi ngay: ${d.address}`);
 });
 $('propsHead').addEventListener('click', (e) => {
   if (e.target.closest('input, button')) return;
@@ -2274,7 +2713,7 @@ function scheduleAutosave() {
 
 function serializeProject() {
   return {
-    version: 6,
+    version: 7,
     fps: state.fps,
     autoAdvance: state.autoAdvance,
     activeFolderId: state.activeFolderId,
@@ -2297,43 +2736,71 @@ function serializeProject() {
   };
 }
 
-function migrateCue(e) {
-  return {
-    id: e.id || nid(), frame: e.frame || 0, address: e.address,
-    args: e.args || [1], lane: laneOf(e.address),
-    name: e.name || '', duration: e.duration || 0, note: e.note || '',
-    color: e.color || '', enabled: e.enabled !== false, mode: e.mode || 'trigger'
+function migrateFolder(f) {
+  const nf = {
+    id: f.id || nid(),
+    name: f.name || 'Thư mục',
+    offset: f.offset || 0,
+    color: f.color || '',
+    hidden: !!f.hidden,
+    collapsed: !!f.collapsed,
+    cues: [],
+    events: []
   };
+  if (Array.isArray(f.cues)) {
+    // v7: cue gốc + điểm đặt
+    nf.cues = f.cues.filter((c) => c && c.address).map((c) => ({
+      id: c.id || nid(), address: c.address, args: c.args || [1],
+      name: c.name || '', note: c.note || '', color: c.color || '', mode: c.mode || 'trigger'
+    }));
+    const ids = new Set(nf.cues.map((c) => c.id));
+    nf.events = (Array.isArray(f.events) ? f.events : [])
+      .filter((e) => e && ids.has(e.cueId))
+      .map((e) => ({
+        id: e.id || nid(), cueId: e.cueId, frame: e.frame || 0,
+        lane: e.lane || 'V1', duration: e.duration || 0, enabled: e.enabled !== false
+      }));
+  } else {
+    // v3–v6: mỗi event tự mang address → gom thành cue gốc theo address
+    (Array.isArray(f.events) ? f.events : []).forEach((e) => {
+      if (!e || !e.address) return;
+      let d = nf.cues.find((c) => c.address === e.address);
+      if (!d) {
+        d = { id: nid(), address: e.address, args: e.args || [1], name: e.name || '', note: e.note || '', color: e.color || '', mode: e.mode || 'trigger' };
+        nf.cues.push(d);
+      }
+      nf.events.push({
+        id: e.id || nid(), cueId: d.id, frame: e.frame || 0,
+        lane: e.lane || laneOf(e.address), duration: e.duration || 0, enabled: e.enabled !== false
+      });
+    });
+  }
+  nf.events.sort((a, b) => a.frame - b.frame);
+  return nf;
 }
 
 function applyProject(data) {
-  if (!data || ![3, 4, 5, 6].includes(data.version)) { setStatus('File dự án không hợp lệ.'); return; }
+  if (!data || ![3, 4, 5, 6, 7].includes(data.version)) { setStatus('File dự án không hợp lệ.'); return; }
   pause();
+  state.ppsInit = false; // nạp xong tính lại zoom khớp nội dung
   state.fps = data.fps || 30;
   $('fpsSel').value = String(state.fps);
   state.rowH = data.rowH || 38;
   state.aRowH = data.aRowH || 60;
   state.showAllFolders = !!data.showAllFolders;
   const chk = $('showAllChk'); if (chk) chk.checked = state.showAllFolders;
-  const rh = $('rowHRange'); if (rh) { rh.value = state.rowH; }
-  const ah = $('aRowHRange'); if (ah) { ah.value = state.aRowH; }
+  const rh = $('rowHRange'); if (rh) rh.value = state.rowH;
   state.folders = (Array.isArray(data.folders) && data.folders.length)
-    ? data.folders.map((f) => ({
-        id: f.id || nid(),
-        name: f.name || 'Thư mục',
-        offset: f.offset || 0,
-        color: f.color || '',
-        hidden: !!f.hidden,
-        events: Array.isArray(f.events) ? f.events.filter((e) => e && e.address).map(migrateCue) : []
-      }))
-    : [{ id: nid(), name: 'Chính', offset: 0, events: [], color: '', hidden: false }];
+    ? data.folders.map(migrateFolder)
+    : [{ id: nid(), name: 'Chính', offset: 0, events: [], cues: [], color: '', hidden: false, collapsed: false }];
   state.songs = (Array.isArray(data.songs) ? data.songs : []).map((s) => ({
     id: s.id || nid(), name: s.name || 'Bài', path: s.path || '',
     duration: s.duration || 0, size: s.size || 0, peaks: null, decoding: false
   }));
   state.lanes = (Array.isArray(data.lanes) && data.lanes.length)
     ? data.lanes.filter((l) => l && l.name).map((l) => ({
-        id: l.id || nid(), name: l.name, kind: l.kind || l.name[0], songId: l.songId || null
+        id: l.id || nid(), name: l.name, kind: l.kind || l.name[0],
+        songId: l.songId || null, songOffset: l.songOffset || 0, locked: !!l.locked
       }))
     : [];
   state.songIndex = -1;
@@ -2346,9 +2813,11 @@ function applyProject(data) {
   refreshAll();
   ensureLanesForProject();
   renderLanes();
-  // nếu dự án có nhạc mà chưa lane A nào gắn bài → gắn bài đầu vào lane A đầu
-  const aLane = state.lanes.find((l) => l.kind === 'A');
-  if (aLane && !aLane.songId && state.songs[0]) aLane.songId = state.songs[0].id;
+  // dự án cũ (<v7): gắn bài đầu vào lane A đầu cho tiện — v7 giữ đúng như đã lưu
+  if (data.version < 7) {
+    const aLane = state.lanes.find((l) => l.kind === 'A');
+    if (aLane && !aLane.songId && state.songs[0]) aLane.songId = state.songs[0].id;
+  }
   // nạp lại waveform các bài
   state.songs.forEach((s) => { if (s.path) { decodeWaveform(s); } });
   const st = data.settings || {};
@@ -2371,13 +2840,58 @@ function applyProject(data) {
   setStatus(`Đã nạp dự án: ${state.folders.length} thư mục, ${state.songs.length} bài.`);
 }
 
+let projPath = null; // file dự án đang mở — ⌘S lưu thẳng vào đây
+
 async function saveProjectDialog() {
-  const r = await window.hs.saveProject(serializeProject());
-  if (r) setStatus('Đã lưu dự án: ' + r);
+  if (projPath) {
+    try {
+      await window.hs.saveProjectTo(projPath, serializeProject());
+      setStatus('Đã lưu: ' + projPath);
+    } catch (err) { setStatus('Lỗi lưu: ' + err.message); }
+    return;
+  }
+  await saveProjectAsDialog();
 }
+
+async function saveProjectAsDialog() {
+  const r = await window.hs.saveProject(serializeProject());
+  if (r) { projPath = r; setStatus('Đã lưu dự án: ' + r); }
+}
+
 async function openProjectDialog() {
   const r = await window.hs.openProject();
-  if (r) applyProject(r.data);
+  if (r) { applyProject(r.data); projPath = r.path; }
+}
+
+function newProjectDialog() {
+  if (!confirm('Tạo dự án mới? Thay đổi chưa lưu của dự án hiện tại sẽ mất.')) return;
+  pause();
+  projPath = null;
+  state.folders = [];
+  state.songs = [];
+  state.songIndex = -1;
+  state.lanes = [];
+  state.recLaneId = null;
+  state.sel = null;
+  state.multiSel = new Set();
+  state.clipboard = null;
+  state.clipboardMulti = null;
+  state.frame = 0;
+  state.viewStart = 0;
+  state.ppsInit = false;
+  audio.pause();
+  audio.removeAttribute('src');
+  audio.load();
+  addLane('V', true);
+  addLane('V', true);
+  addLane('V', true);
+  addLane('A', true);
+  addLane('R', true);
+  addFolder();
+  renderSongs();
+  updateAudioName();
+  refreshAll();
+  setStatus('Dự án mới — chưa lưu.');
 }
 $('btnSaveProj').addEventListener('click', saveProjectDialog);
 $('btnOpenProj').addEventListener('click', openProjectDialog);
@@ -2386,7 +2900,7 @@ document.addEventListener('keydown', (e) => {
   if (e.target.closest('input, select, textarea')) return;
   const k = e.key.toLowerCase();
   if (e.metaKey || e.ctrlKey) {
-    if (k === 's') { e.preventDefault(); saveProjectDialog(); }
+    if (k === 's') { e.preventDefault(); e.shiftKey ? saveProjectAsDialog() : saveProjectDialog(); }
     else if (k === 'o') { e.preventDefault(); openProjectDialog(); }
     else if (k === 'c') { e.preventDefault(); copySelection(); }
     else if (k === 'x') { e.preventDefault(); cutSelection(); }
@@ -2408,7 +2922,7 @@ function selectAllCues() {
 
 /* ================= Khởi động ================= */
 (function init() {
-  if (!state.folders.length) addFolder('Chính');
+  if (!state.folders.length) addFolder();
   if (!state.lanes.length) {
     addLane('V', true);
     addLane('V', true);
@@ -2431,7 +2945,7 @@ function selectAllCues() {
     const saved = localStorage.getItem(AUTOSAVE_KEY);
     if (saved) {
       const data = JSON.parse(saved);
-      if ([3, 4, 5, 6].includes(data.version)) { applyProject(data); restored = true; }
+      if ([3, 4, 5, 6, 7].includes(data.version)) { applyProject(data); restored = true; }
     }
   } catch (_) { /* bỏ qua */ }
   if (!restored) refreshAll();

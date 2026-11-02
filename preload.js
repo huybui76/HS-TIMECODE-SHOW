@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('hs', {
     ipcRenderer.invoke('osc-send', { address, args, host, port }),
   setListenPort: (p) => ipcRenderer.invoke('port-set', p),
   saveProject: (data) => ipcRenderer.invoke('project-save', data),
+  saveProjectTo: (filePath, data) => ipcRenderer.invoke('project-save-to', filePath, data),
   openProject: () => ipcRenderer.invoke('project-open'),
   openAudio: () => ipcRenderer.invoke('audio-open'),
   openAudioMulti: () => ipcRenderer.invoke('audio-open-multi'),

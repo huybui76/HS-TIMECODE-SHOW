@@ -102,6 +102,11 @@ ipcMain.handle('project-save', async (_e, data) => {
   return r.filePath;
 });
 
+ipcMain.handle('project-save-to', (_e, filePath, data) => {
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  return filePath;
+});
+
 ipcMain.handle('project-open', async () => {
   const r = await dialog.showOpenDialog(win, {
     filters: [{ name: 'JSON', extensions: ['json'] }],
