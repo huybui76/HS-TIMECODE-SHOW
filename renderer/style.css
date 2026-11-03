@@ -490,6 +490,16 @@ button.hidebtn:disabled { opacity: .45; }
 #midiRecBar button { padding: 5px 10px; font-size: 12px; white-space: nowrap; }
 .mr-lane { display: flex; align-items: center; gap: 5px; color: var(--dim); font-size: 10px; font-weight: 700; white-space: nowrap; }
 .mr-lane select { padding: 4px 6px; }
+.mr-tpl {
+  width: 170px; padding: 4px 8px;
+  font-family: "SF Mono", Menlo, monospace; font-size: 11px;
+  background: #120d09; color: #9fc3ff;
+  border: 1px solid #3a2c1a; border-radius: 6px;
+  white-space: nowrap;
+}
+.mr-tpl:focus { outline: none; border-color: #ffb36b; }
+.mr-check { display: flex; align-items: center; gap: 4px; color: var(--dim); font-size: 10px; font-weight: 700; white-space: nowrap; cursor: pointer; }
+.mr-check input { accent-color: #ffb36b; }
 .rx-badge {
   font-family: "SF Mono", Menlo, monospace;
   font-size: 11px; font-weight: 700;

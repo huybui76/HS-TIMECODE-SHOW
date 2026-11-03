@@ -9,6 +9,11 @@ const state = {
   loop: false,
   recArmed: false,
   recMode: 'overdub',      // 'overdub' | 'overwrite'
+  recSource: 'midi',       // 'midi' = ghi từ đàn/pad (Web MIDI) | 'osc' = ghi từ OSC Resolume gửi về
+  midiDeviceId: null,      // thiết bị MIDI vào đang chọn (Web MIDI id)
+  midiTpl: '/midi/note/{n}',   // mẫu địa chỉ OSC cho pad: {n} = note 0-127, {c} = kênh 1-16
+  midiPadMode: 'auto',     // 'auto' = địa chỉ theo mẫu | 'learn' = học từ OSC vào gần nhất
+  midiBounce: true,        // bấm pad là bắn OSC ngay (kể cả khi không REC)
   folders: [],             // [{id, name, offset, events:[{id, frame, address, args, lane}]}]
   activeFolderId: null,    // thư mục nhận cue khi ghi
   lanes: [],               // [{id, name:'V1'|'A1'|'R1', kind:'V'|'A'|'R'}] — thứ tự trên timeline (V trên, A giữa, R dưới)
@@ -195,8 +200,9 @@ function recLane() {
 }
 
 function ensureLanesForProject() {
-  // bảo đảm mọi cue.lane đều có lane trên timeline
-  const names = new Set(flat.map((x) => x.ev.lane));
+  // bảo đảm mọi cue.lane của BÀI ĐANG MỞ đều có lane trên timeline (KHÔNG đọc cue bài khác)
+  const f = curFolder();
+  const names = new Set((f ? f.events : []).map((x) => x.lane));
   names.forEach((name) => {
     if (!laneByName(name)) {
       const kind = /^[VA]/.test(name) ? name[0] : 'V';
@@ -292,10 +298,11 @@ function filterDescription() {
 
 /* ================= Đóng gói cue theo OFFSET ================= */
 function rebuildFlat() {
+  /* flat = LỊCH PHÁT CUE của DUY NHẤT bài đang mở — fireDue() bắn OSC từ đây.
+     KHÔNG được gộp cue của bài khác: playback phải thuần project isolation. */
   flat = [];
-  state.folders.forEach((f) => {
-    f.events.forEach((ev) => flat.push({ t: f.offset + ev.frame, ev, f }));
-  });
+  const f = curFolder();
+  if (f) f.events.forEach((ev) => flat.push({ t: f.offset + ev.frame, ev, f }));
   flat.sort((a, b) => a.t - b.t);
 }
 
@@ -322,19 +329,18 @@ function refreshVF() {
 
 /* ================= Thư mục cue ================= */
 function addFolder(name) {
-  // mỗi BÀI là một timecode riêng — timeline mới luôn TRỐNG, không liên quan bài trước
-  const f = { id: nid(), name: name || `Bài ${state.folders.length + 1}`, offset: 0, events: [], cues: [], color: '', hidden: false, collapsed: false };
+  // mỗi BÀI là một PROJECT ĐỘC LẬP — timeline, nhạc, cue đều TRỐNG, không liên quan bài trước
+  const f = Object.assign(
+    { id: nid(), name: name || `Bài ${state.folders.length + 1}`, offset: 0, events: [], cues: [], color: '', hidden: false, collapsed: false },
+    freshProjectData()
+  );
   state.folders.push(f);
-  state.activeFolderId = f.id;
   pause();                 // thêm bài = đứng im ngay, không tự chạy
-  state.frame = 0;
-  state.sel = null;
-  state.multiSel = new Set();
-  state.viewStart = 0;
-  state.ppsInit = false;   // thước về zoom mặc định 50% (3 phút vừa màn hình)
+  activateProject(f);      // nạp dữ liệu trống của bài mới (frame về 0, audio dừng)
   refreshAll();
   renderProps();
   updateSelBar();
+  scheduleAutosave();
   return f;
 }
 
@@ -343,11 +349,105 @@ function removeFolder(id) {
   if (i < 0) return;
   const f = state.folders[i];
   if (f.events.length && !confirm(`Xóa bài "${f.name}" (${f.events.length} cue)?`)) return;
+  const wasActive = f.id === state.activeFolderId;
   state.folders.splice(i, 1);
   if (state.sel && !state.folders.some((x) => x.events.includes(state.sel))) state.sel = null;
-  if (!state.folders.length) addFolder();
-  else if (state.activeFolderId === id) state.activeFolderId = state.folders[Math.max(0, i - 1)].id;
+  if (!state.folders.length) { addFolder(); return; }
+  if (wasActive) {
+    // bài đang mở bị xóa → mở bài kế bên (dữ liệu bài xóa biến mất cùng nó)
+    activateProject(state.folders[Math.max(0, i - 1)]);
+    refreshAll();
+  }
+}
+
+/* ================= PROJECT MANAGER — mỗi BÀI là một project ĐỘC LẬP HOÀN TOÀN =================
+   • Dữ liệu RIÊNG TỪNG bài, sống TRONG folder: songs, audioClips, lanes, recLaneId, pstate
+     (playback settings: frame, zoom, fps, speed, loop, hết-phát, volume, bài đang chọn…).
+   • `state` chỉ là bản LÀM VIỆC của bài đang mở — Playback Engine duy nhất chạy trên nó.
+   • Chuyển bài: PAUSE → chép dữ liệu làm việc về bài cũ → nạp dữ liệu bài mới (đúng trạng thái đã lưu).
+   • KHÔNG có biến global nào giữ dữ liệu riêng của 2 bài cùng lúc. */
+function freshProjectData() {
+  return { songs: [], audioClips: [], lanes: [], recLaneId: null, pstate: null };
+}
+
+/* chép bản làm việc hiện tại về bài đang mở (trước khi rời bài / trước khi Save) */
+function captureActiveProject() {
+  const f = curFolder();
+  if (!f) return;
+  f.songs = state.songs;
+  f.audioClips = state.audioClips;
+  f.lanes = state.lanes;
+  f.recLaneId = state.recLaneId;
+  f.pstate = {
+    frame: Math.round(state.frame), viewStart: state.viewStart,
+    pps: state.pps, ppsInit: state.ppsInit,
+    fps: state.fps, speed: state.speed, loop: state.loop,
+    playbackEndMode: state.playbackEndMode, autoAdvance: state.autoAdvance,
+    masterVol, songIndex: state.songIndex,
+    rowH: state.rowH, aRowH: state.aRowH
+  };
+}
+
+/* nạp dữ liệu của 1 bài vào bản làm việc `state` + đồng bộ toàn bộ UI */
+function activateProject(f) {
+  if (!f.songs) Object.assign(f, freshProjectData());   // bài mới/l cũ chưa có dữ liệu riêng
+  state.activeFolderId = f.id;
+  state.songs = f.songs;
+  state.audioClips = f.audioClips;
+  state.lanes = f.lanes;
+  state.recLaneId = f.recLaneId || null;
+  const p = f.pstate || {};
+  state.fps = p.fps || 30; $('fpsSel').value = String(state.fps);
+  state.speed = p.speed || 1; $('speedSel').value = String(state.speed);
+  state.loop = !!p.loop;                                  // updateTransport() sẽ chấm nút ⟲
+  state.playbackEndMode = p.playbackEndMode === 'contentEndPlus10' ? 'contentEndPlus10' : 'infinite';
+  const pe = $('playEndSel'); if (pe) pe.value = state.playbackEndMode;
+  state.autoAdvance = p.autoAdvance !== false; $('autoAdvChk').checked = state.autoAdvance;
+  masterVol = typeof p.masterVol === 'number' ? p.masterVol : 0.9;
+  $('vol').value = String(masterVol);
+  audio.volume = masterVol;
+  state.rowH = p.rowH || 60; state.aRowH = p.aRowH || clamp(Math.round(state.rowH * 1.6), 30, 150);
+  const rh = $('rowHRange'); if (rh) rh.value = state.rowH;
+  state.viewStart = p.viewStart || 0;
+  if (p.pps > 0) { state.pps = p.pps; state.ppsInit = true; }
+  else { state.pps = 0; state.ppsInit = false; }         // chưa có zoom → tick() tự khớp nội dung
+  state.songIndex = (typeof p.songIndex === 'number' && p.songIndex >= 0 && p.songIndex < state.songs.length) ? p.songIndex : -1;
+  state.frame = Math.max(0, p.frame || 0);                // load đúng trạng thái timeline của bài này
+  state.sel = null; state.multiSel = new Set();
+  state.selClipId = null; state.selAudioLaneId = null;
+  state.clipboardAudio = null;
+  // audio element là của engine: về trạng thái trung lập, KHÔNG tự phát sau khi chuyển bài
+  audio.pause();
+  audioSongId = null;
+  audio.playbackRate = state.speed;
+  rebuildFlat();
+  refreshVF();
+  ensureLanesForProject();                                // bài trống → dựng bộ lane V/A/R mặc định
+  state.playbackIdx = lowerBoundFlat(state.frame);
+  state.audioClips.forEach((c) => {
+    const m = /^au(\d+)$/.exec(String(c.id));
+    if (m) idSeq = Math.max(idSeq, Number(m[1]));
+  });
+  state.songs.forEach((s) => refreshClipBounds(s));
+  state.songs.forEach((s) => { if (s.path && !s.peaks) decodeWaveform(s); });   // nạp lại waveform bài này
+  renderLanes(); renderSongs(); fillRecLaneSel(); updateAudioName();
+  updateTc(); updateTransport(); infoDirty = true;
+  if (state.recLaneId && !laneById(state.recLaneId)) state.recLaneId = (state.lanes.find((l) => l.kind === 'R') || {}).id || null;
+  fillRecLaneSel();
+}
+
+/* chuyển bài: AN TOÀN — dừng phát trước, không trộn dữ liệu, không tự phát sau khi nạp */
+function switchProject(folderId) {
+  const target = state.folders.find((x) => x.id === folderId);
+  if (!target || target.id === state.activeFolderId) return;
+  pause();                    // không bao giờ để 2 project phát chồng âm thanh
+  captureActiveProject();     // toàn bộ dữ liệu đang làm việc → về ĐÚNG bài cũ
+  activateProject(target);    // nạp dữ liệu của bài mới
   refreshAll();
+  renderProps();
+  updateSelBar();
+  flashStatus(`Đã chuyển sang "${target.name}" — phát đã dừng, dữ liệu từng bài độc lập.`);
+  scheduleAutosave();
 }
 
 /* Cue GỐC (định nghĩa, cố định trong danh sách) + đối tượng ĐẶT trên timeline.
@@ -457,7 +557,8 @@ function renderFolders() {
     head.append(chev, name, cnt, eye, colBtn, del);
     head.addEventListener('click', (e) => {
       if (e.target === name || e.target === del || e.target === eye || e.target === colBtn || e.target === chev) return;
-      state.activeFolderId = f.id;
+      // click bài = CHUYỂN PROJECT (Project Manager: pause → chép dữ liệu bài cũ → nạp bài mới)
+      switchProject(f.id);
       // lần 1: thu gọn thư mục — lần 2: xổ danh sách cue ra
       f.collapsed = !f.collapsed;
       fillRecFolderSel();
@@ -650,16 +751,23 @@ function activateSong(i, autoplay = false, keepView = false) {
   const changed = i !== state.songIndex;   // thả THÊM instance cùng bài không nhảy playhead/zoom
   state.songIndex = i;
   const song = curSong();
-  if (changed && !keepView) {
+  // CHỌN KHÔNG ĐỘNG PLAYBACK: chọn bài (trong NHÁC, dblclip…) không được đổi playhead.
+  // reset view chỉ xảy ra với hành động RÕ RÀNG là điều hướng (drop mới, mở project).
+  if (changed && !keepView && !state.playing) {
     state.frame = 0;
     state.ppsInit = false;
     state.viewStart = 0;
   }
   if (song && song.path) {
-    audio.src = 'file://' + encodeURI(song.path);
-    audio.playbackRate = state.speed;
+    // ENGINE đang phát → audio element là của playback engine (tick()), KHÔNG BAO GIỜ
+    // được swap src/seek ở đây — chọn bài khác không được làm gián đoạn clip đang phát
+    if (!state.playing) {
+      audio.src = 'file://' + encodeURI(song.path);
+      audio.playbackRate = state.speed;
+      audioSongId = null;   // src đổi tay → buộc engine thiết lập lại cặp (src, id) khi phát, không dùng id cũ lệch file
+    }
     if (song.duration) decodeWaveform(song);
-  } else {
+  } else if (!state.playing) {
     audio.pause();
     audio.removeAttribute('src');
     audio.load();
@@ -712,7 +820,8 @@ function renderSongs() {
     item.append(info, wave, del);
     item.addEventListener('click', (e) => {
       if (e.target === del) return;
-      activateSong(i);
+      // CHỌN = chỉ lấy làm mốc thời gian — KHÔNG reset playhead, KHÔNG ngắt audio đang phát
+      activateSong(i, false, true);
     });
     item.addEventListener('dragstart', (e) => {
       e.dataTransfer.setData('text/hs-song', String(song.id));
@@ -893,7 +1002,8 @@ function findClipAtFrame(fr) {
     }
   }
   if (!best) return null;
-  return { song: bestSong, clip: best, tlStart: best.tlStart, srcStart: best.srcStart, tlEnd: best.tlStart + (clipLen(best) || bestSong.duration) };
+  // srcEnd PHẢI có trong kết quả — tick() dựa vào clip.srcEnd để quyết định phát (thiếu nó = không bao giờ có tiếng)
+  return { song: bestSong, clip: best, tlStart: best.tlStart, srcStart: best.srcStart, srcEnd: best.srcEnd, tlEnd: best.tlStart + (clipLen(best) || bestSong.duration) };
 }
 
 function contentEndSeconds() {
@@ -940,6 +1050,7 @@ function setFrame(f) {
   state.frame = Math.max(0, f);
   // đang dừng: xem trước âm thanh bám theo clip dưới thanh đò
   if (!state.playing) {
+    const clip = findClipAtFrame(state.frame);   // trước đây dùng biến chưa khai báo → ReferenceError khi ⏹/seek
     const local = clip ? clamp(clip.srcStart + (state.frame / state.fps - clip.tlStart), 0, Math.max(0, clip.srcEnd - 0.02)) : 0;
     if (clip && audioSongId === clip.song.id && audio.paused && !audio.ended) {
       if (Math.abs(audio.currentTime - local) > 0.05) audio.currentTime = local;
@@ -1032,13 +1143,15 @@ function onOscMessage(msg) {
   rxLocal++;
   monRow(msg.address, msg.args, false);
   recordOscSeen(msg.address, msg.args);
+  midiPadLearn(msg.address, msg.args);   // nuôi PAD Học: nhớ OSC vào gần nhất
   if (TEST_OSC.on) toRecord(msg);
   const badge = $('mrRx');
   badge.textContent = 'RX ' + rxLocal;
   badge.classList.add('flash');
   setTimeout(() => badge.classList.remove('flash'), 120);
   $('mrLast').textContent = msg.address + '  ' + (msg.args || []).join(',');
-  if (state.recArmed && state.playing && passFilter(msg.address)) {
+  // GHI OSC: chỉ khi nguồn REC = 'osc' (nguồn 'midi' ghi từ đàn — tránh ghi trùng 2 nguồn)
+  if (state.recArmed && state.playing && state.recSource === 'osc' && passFilter(msg.address)) {
     const f = curFolder();
     if (!f) { setStatus('Chưa có thư mục cue — nhấn ＋ Bài.'); return; }
     const rl = recLane();
@@ -1425,7 +1538,8 @@ function makeAudioClip(songId, laneId, tlStart, srcStart, srcEnd) {
     id: 'au' + nid(),          // instanceId — MỖI instance một id riêng, không bao giờ trùng dù cùng sourceId
     songId, laneId,
     tlStart: Math.max(0, tlStart), srcStart: Math.max(0, srcStart), srcEnd: Math.max(0, srcEnd),
-    volume: 1, fadeIn: 0, fadeOut: 0   // thuộc tính RIÊNG từng instance (độc lập giữa các instance cùng source)
+    volume: 1, fadeIn: 0, fadeOut: 0,   // thuộc tính RIÊNG từng instance (độc lập giữa các instance cùng source)
+    mute: false                          // im tiếng RIÊNG từng instance — không đụng instance khác
   };
 }
 function clipLen(clip) { return Math.max(0, (clip.srcEnd || 0) - (clip.srcStart || 0)); }          // độ dài segment (giây)
@@ -1838,7 +1952,10 @@ canvas.addEventListener('dblclick', (e) => {
   const clip = audioClipHit(e.clientX - r.left, e.clientY - r.top);
   if (clip && clip.song) {
     const si = state.songs.findIndex((s) => s.id === clip.song.id);
-    if (si >= 0) { activateSong(si); flashStatus(`Đã lấy "${state.songs[si].name}" làm mốc thời gian.`); }
+    if (si >= 0) {
+      activateSong(si, false, true);   // chỉ làm mốc — không reset playhead, không ngắt playback
+      flashStatus(`Đã lấy "${state.songs[si].name}" làm mốc thời gian (playback không đổi).`);
+    }
   }
 });
 
@@ -2088,7 +2205,9 @@ function tick(t) {
     // ÂM THANH THEO CLIP INSTANCE: clip nào nằm dưới playhead (lane A bất kỳ) thì phát, đúng srcStart → srcEnd
     const clip = findClipAtFrame(state.frame);
     const local = clip ? (clip.srcStart + (state.frame / state.fps - clip.tlStart)) : 0;
-    if (clip && !audio.ended && local < clip.srcEnd - 0.01) {
+    if (clip && local < clip.srcEnd - 0.01) {
+      // KHÔNG dùng !audio.ended làm gate: khi bài nguồn đã phát hết file (ended), playhead vẫn
+      // phải phát tiếp các clip khác/seek lại — seek currentTime sẽ tự xóa cờ ended
       if (audioSongId !== clip.song.id) {
         audio.src = 'file://' + encodeURI(clip.song.path);
         audioSongId = clip.song.id;
@@ -2098,8 +2217,9 @@ function tick(t) {
         audio.currentTime = clamp(local, 0, Math.max(0, clip.song.duration - 0.02));
       }
       if (audio.paused) audio.play().catch(() => {});
-      // ÂM LƯỢNG theo INSTANCE: tổng (🔊) × volume riêng của clip × fade in/out — mỗi instance độc lập
-      const vol = clamp(masterVol * (typeof clip.clip.volume === 'number' ? clip.clip.volume : 1) * fadeFactor(clip.clip, local), 0, 1);
+      // ÂM LƯỢNG theo INSTANCE: tổng (🔊) × volume riêng × fade in/out × mute — mỗi instance độc lập
+      const vol = clip.clip.mute ? 0
+        : clamp(masterVol * (typeof clip.clip.volume === 'number' ? clip.clip.volume : 1) * fadeFactor(clip.clip, local), 0, 1);
       if (Math.abs(audio.volume - vol) > 0.01) audio.volume = vol;
       // playhead bám theo fireplace thật — tính từ tlStart trừ đi srcStart (tiết kiệm mapping)
       state.frame = (clip.tlStart - clip.srcStart + audio.currentTime) * state.fps;
@@ -2343,7 +2463,7 @@ const menuActions = {
   zoomout: () => zoomPps(1 / 1.3),
   home: () => setFrame(0),
   follow: () => { $('followChk').checked = !$('followChk').checked; state.follow = $('followChk').checked; flashStatus('Theo thanh đò: ' + (state.follow ? 'BẬT' : 'TẮT')); },
-  help: () => flashStatus('Quy trình: ① Bật Output trong Resolume (Preferences → OSC → 127.0.0.1:7000) ② Kéo nhạc vào lane A ③ Bật REC, Phát, gõ MIDI ④ Dừng REC, Play lại để chạy show. ⌘-click chọn nhiều cue. Kéo cue từ danh sách vào timeline = tạo bản sao (giữ Alt khi kéo trên timeline cũng vậy).'),
+  help: () => flashStatus('Quy trình: ① Bật OSC (panel KẾT NỐI OSC) + Bật Output trong Resolume (Preferences → OSC → 127.0.0.1:7000) ② Kéo nhạc vào lane A ③ Bật REC, Phát, gõ MIDI ④ Dừng REC, Play lại để chạy show. ⌘-click chọn nhiều cue. Kéo cue từ danh sách vào timeline = tạo bản sao (giữ Alt khi kéo trên timeline cũng vậy).'),
   testosc: () => openTestOsc()
 };
 
@@ -2405,7 +2525,10 @@ $('btnRec').addEventListener('click', () => {
     const f = curFolder();
     if (!f) { addFolder(); }
     if (!state.playing) play();
-    flashStatus(`REC BẬT — ghi vào thư mục "${(f || curFolder()).name}". Gõ MIDI vào Resolume ngay.`);
+    flashStatus(`REC BẬT — ghi vào thư mục "${(f || curFolder()).name}".` +
+      (state.recSource === 'osc' && !window.__oscListening
+        ? ' ⚠ OSC đang TẮT — bấm "Bật OSC" (panel KẾT NỐI OSC) để ghi được từ Resolume.'
+        : ' Gõ MIDI vào Resolume ngay.'));
   } else {
     flashStatus('REC TẮT.');
   }
@@ -2505,9 +2628,16 @@ function selSet() {
 
 function updateSelBar() {
   const n = selSet().size;
-  const hasAudio = !!selAudioClip();
-  $('selCount').textContent = hasAudio ? '1 clip nhạc' : `${n} đã chọn`;
-  $('selBar').style.display = (n || hasAudio) ? 'flex' : 'none';
+  const ac = selAudioClip();
+  $('selCount').textContent = ac ? '1 clip nhạc' : `${n} đã chọn`;
+  $('selBar').style.display = (n || ac) ? 'flex' : 'none';
+  // nút Mute phản chiếu đúng TRẠNG THÁI INSTANCE đang chọn
+  const mb = $('btnSelMute');
+  if (mb) {
+    mb.classList.toggle('active', !!(ac && ac.mute));
+    mb.textContent = ac && ac.mute ? '🔇 ĐANG MUTE' : '🔇 Mute';
+    mb.style.display = ac ? '' : 'none';
+  }
 }
 
 function selAudioLane() {
@@ -2528,7 +2658,8 @@ function copySelection() {
   if (c) {
     state.clipboardAudio = {
       songId: c.songId, srcStart: c.srcStart, srcEnd: c.srcEnd,
-      volume: typeof c.volume === 'number' ? c.volume : 1, fadeIn: c.fadeIn || 0, fadeOut: c.fadeOut || 0
+      volume: typeof c.volume === 'number' ? c.volume : 1, fadeIn: c.fadeIn || 0, fadeOut: c.fadeOut || 0,
+      mute: !!c.mute
     };
     flashStatus('Đã sao chép clip nhạc (segment — tham chiếu source gốc).');
     return true;
@@ -2599,7 +2730,7 @@ function pasteSelection(atFrame) {
     let srcEnd = cb.srcEnd > 0 ? cb.srcEnd : (song.duration > 0 ? song.duration : 0);
     if (song.duration > 0 && srcEnd > song.duration) srcEnd = song.duration;
     const clip = makeAudioClip(song.id, lane.id, at, cb.srcStart, srcEnd);
-    clip.volume = cb.volume; clip.fadeIn = cb.fadeIn; clip.fadeOut = cb.fadeOut;
+    clip.volume = cb.volume; clip.fadeIn = cb.fadeIn; clip.fadeOut = cb.fadeOut; clip.mute = !!cb.mute;
     state.audioClips.push(clip);
     refreshClipBounds(song);
     state.selClipId = clip.id;
@@ -2672,6 +2803,14 @@ $('btnSelCopy').addEventListener('click', copySelection);
 $('btnSelCut').addEventListener('click', cutSelection);
 $('btnSelPaste').addEventListener('click', () => pasteSelection());
 $('btnSelHide').addEventListener('click', toggleHideSelection);
+$('btnSelMute').addEventListener('click', () => {
+  const c = selAudioClip();
+  if (!c) { setStatus('Chưa chọn clip nhạc nào.'); return; }
+  c.mute = !c.mute;                       // chỉ đụng INSTANCE này — instance khác/source không đổi
+  updateSelBar();
+  scheduleAutosave();
+  flashStatus(c.mute ? `Đã MUTE instance @ ${tcString(Math.round(c.tlStart * state.fps), state.fps)} — phát tới clip này sẽ im tiếng.` : 'Đã bỏ mute instance.');
+});
 $('btnSelDel').addEventListener('click', () => deleteSelection());
 $('btnSelNone').addEventListener('click', deselectAll);
 $('btnCueUp').addEventListener('click', () => nudgeSelected(-1));
@@ -2712,12 +2851,27 @@ $('btnApplyPort').addEventListener('click', () => {
   const p = parseInt($('listenPort').value, 10);
   if (!(p >= 1024 && p <= 65535)) { setStatus('Cổng nghe không hợp lệ (1024–65535).'); return; }
   state.listenPort = p;
-  window.hs.setListenPort(p).catch((e) => setStatus('Lỗi đổi cổng: ' + e.message));
+  window.hs.setListenPort(p)
+    .then(() => setStatus(window.__oscListening
+      ? `Đã đổi cổng nghe :${p}.`
+      : `Đã lưu cổng nghe :${p} — OSC đang TẮT, bấm "Bật OSC" để nghe.`))
+    .catch((e) => setStatus('Lỗi đổi cổng: ' + e.message));
+});
+
+/* Main OSC mặc định TẮT khi mở app — nút này là công tắc DUY NHẤT bật/tắt cổng nghe */
+$('btnOscToggle').addEventListener('click', () => {
+  if (window.__oscListening) {
+    window.hs.oscDisable().catch((e) => setStatus('Lỗi tắt OSC: ' + e.message));
+  } else {
+    window.hs.oscEnable().catch((e) => setStatus('Lỗi bật OSC: ' + e.message));
+  }
 });
 $('targetHost').addEventListener('change', (e) => { state.target.host = e.target.value.trim() || '127.0.0.1'; });
 $('targetPort').addEventListener('change', (e) => { state.target.port = parseInt(e.target.value, 10) || 7001; });
 
 $('btnCheckResolume').addEventListener('click', () => {
+  // Kiểm tra cần NHẬN phản hồi — tự bật cổng nghe nếu đang TẮT (hành động của người dùng)
+  if (!window.__oscListening) window.hs.oscEnable().catch(() => {});
   const rxBefore = rxLocal;
   setStatus('Đã gửi lệnh test (bật clip L1C1 trong Resolume) — chờ phản hồi 3 giây…');
   sendOsc('/composition/layers/1/clips/1/connect', [1]);
@@ -2757,13 +2911,18 @@ setupDrop($('audioDrop'), false); // kéo nhạc vào KHÔNG tự phát — đ�
 /* OSC từ main process */
 window.hs.onOsc(onOscMessage);
 window.hs.onStatus((s) => {
+  window.__oscListening = !!s.listening;   // mini bridge đọc cờ này khi broadcast
   const el = $('oscStatus');
+  const tgl = $('btnOscToggle');
+  tgl.classList.toggle('armed', !!s.listening);
   if (s.listening) {
+    tgl.textContent = '■ Tắt OSC';
     el.className = 'pill on';
     el.textContent = `ĐANG NGHE :${s.port}`;
   } else {
+    tgl.textContent = '▶ Bật OSC';
     el.className = 'pill off';
-    el.textContent = s.error ? `LỖI: ${s.error}` : 'ĐÓNG';
+    el.textContent = s.error ? `LỖI: ${s.error}` : 'TẮT';
   }
 });
 
@@ -2828,6 +2987,8 @@ function toRecord(msg) {
 $('toClose').addEventListener('click', closeTestOsc);
 $('testOscModal').addEventListener('mousedown', (e) => { if (e.target === $('testOscModal')) closeTestOsc(); });
 $('toStart').addEventListener('click', () => {
+  // Test OSC cần cổng nghe để nhận — bấm "Bắt đầu nhận" là hành động bật OSC của người dùng
+  if (!window.__oscListening) window.hs.oscEnable().catch(() => {});
   TEST_OSC.on = true;
   $('toStart').disabled = true;
   $('toStart').textContent = '● Đang nhận…';
@@ -3138,36 +3299,43 @@ function scheduleAutosave() {
 }
 
 function serializeProject() {
+  captureActiveProject();   // dữ liệu đang làm việc phải nằm về ĐÚNG bài đang mở trước khi ghi đĩa
   return {
-    version: 8,
+    version: 9,
     fps: state.fps,
     autoAdvance: state.autoAdvance,
     playbackEndMode: state.playbackEndMode,
     activeFolderId: state.activeFolderId,
     recLaneId: state.recLaneId,
     songIndex: state.songIndex,
-    folders: state.folders,
     rowH: state.rowH,
     aRowH: state.aRowH,
     pps: state.pps ? +(state.pps.toFixed(3)) : 0,   // Zoom NGANG đang dùng — khôi phục khi mở lại project
     showAllFolders: state.showAllFolders,
-    // lane A giờ chỉ là "track" vẽ — dữ liệu nhạc sống trong audioClips (mỗi instance một dòng)
-    lanes: state.lanes.map((l) => ({ id: l.id, name: l.name, kind: l.kind, songId: null, songOffset: 0, songEnd: 0, locked: !!l.locked })),
-    // AUDIO INSTANCE (v8): đầy đủ sourceId/instanceId/trackId + range source & timeline — Cut/Trim
-    // chỉ đổi range, Source không bao giờ bị copy hay xóa; Save→Load giữ nguyên mọi segment
-    audioClips: state.audioClips.map((c) => ({
-      instanceId: c.id,          // id riêng của TỪNG instance (không dùng sourceId làm id)
-      sourceId: c.songId,        // bài gốc trong songs[] — nhiều instance chung 1 sourceId
-      trackId: c.laneId,
-      timelineStart: c.tlStart,
-      timelineEnd: c.tlStart + clipLen(c),
-      sourceStart: c.srcStart,
-      sourceEnd: c.srcEnd,
-      volume: typeof c.volume === 'number' ? c.volume : 1,
-      fadeIn: c.fadeIn || 0,
-      fadeOut: c.fadeOut || 0
+    // v9: MỖI BÀI (folder) tự mang dữ liệu độc lập — không có audio/cue/track dùng chung giữa các bài
+    folders: state.folders.map((f) => ({
+      id: f.id, name: f.name, offset: f.offset, color: f.color, hidden: !!f.hidden, collapsed: !!f.collapsed,
+      cues: f.cues, events: f.events,
+      // AUDIO: riêng từng bài — files (source) + instance (range/volume/fade/mute)
+      songs: (f.songs || []).map((s) => ({ id: s.id, name: s.name, path: s.path, duration: s.duration, size: s.size })),
+      audioClips: (f.audioClips || []).map((c) => ({
+        instanceId: c.id,          // id riêng của TỪNG instance (không dùng sourceId làm id)
+        sourceId: c.songId,        // bài gốc trong songs[] của CÙNG bài này
+        trackId: c.laneId,
+        timelineStart: c.tlStart,
+        timelineEnd: c.tlStart + clipLen(c),
+        sourceStart: c.srcStart,
+        sourceEnd: c.srcEnd,
+        volume: typeof c.volume === 'number' ? c.volume : 1,
+        fadeIn: c.fadeIn || 0,
+        fadeOut: c.fadeOut || 0,
+        mute: !!c.mute
+      })),
+      // TRACKS: riêng từng bài
+      lanes: (f.lanes || []).map((l) => ({ id: l.id, name: l.name, kind: l.kind, locked: !!l.locked })),
+      recLaneId: f.recLaneId || null,
+      pstate: f.pstate || null       // playback settings riêng của bài này
     })),
-    songs: state.songs.map((s) => ({ id: s.id, name: s.name, path: s.path, duration: s.duration, size: s.size })),
     settings: {
       listenPort: state.listenPort,
       targetHost: state.target.host,
@@ -3179,7 +3347,9 @@ function serializeProject() {
   };
 }
 
-function migrateFolder(f) {
+function migrateFolder(f, legacy) {
+  /* legacy (v≤8): { songs, audioClips, lanes, activeFolderId } — dữ liệu audio global cũ
+     được gắn về ĐÚNG MỘT bài (bài active) để không trộn dữ liệu giữa các bài */
   const nf = {
     id: f.id || nid(),
     name: f.name || 'Thư mục',
@@ -3226,6 +3396,31 @@ function migrateFolder(f) {
     });
   }
   nf.events.sort((a, b) => a.frame - b.frame);
+  // ===== dữ liệu AUDIO/TRACK RIÊNG TỪNG BÀI =====
+  if (f.songs || f.audioClips || f.lanes) {
+    // v9: folder tự mang dữ liệu — nạp nguyên khối, instance migrate đúng range/volume/mute
+    nf.songs = (f.songs || []).map((s) => ({
+      id: s.id || nid(), name: s.name || 'Bài', path: s.path || '',
+      duration: s.duration || 0, size: s.size || 0, peaks: null, decoding: false
+    }));
+    nf.lanes = (f.lanes || []).filter((l) => l && l.name).map((l) => ({
+      id: l.id || nid(), name: l.name, kind: l.kind || l.name[0], locked: !!l.locked
+    }));
+    if (!nf.lanes.length) nf.lanes = [];   // activateProject sẽ dựng bộ lane mặc định
+    nf.audioClips = migrateAudioClips({ audioClips: f.audioClips || [] }, nf.songs, nf.lanes.length ? nf.lanes : [{ id: 1, kind: 'A' }]);
+    nf.recLaneId = f.recLaneId || null;
+    nf.pstate = f.pstate || null;
+  } else if (legacy && legacy.isOwnFolder) {
+    // v≤8: dữ liệu audio global cũ → gắn về ĐÚNG MỘT bài (bài active khi lưu) — không trộn 2 bài
+    nf.songs = legacy.songs;
+    nf.lanes = legacy.lanes;
+    nf.audioClips = legacy.audioClips;
+    nf.recLaneId = legacy.recLaneId || null;
+    nf.pstate = null;
+  } else {
+    // bài khác của dự án cũ: hoàn toàn TRỐNG — không được thừa hưởng nhạc của bài khác
+    Object.assign(nf, freshProjectData());
+  }
   return nf;
 }
 
@@ -3249,6 +3444,7 @@ function migrateAudioClips(data, songs, lanes) {
       clip.volume = typeof c.volume === 'number' ? clamp(c.volume, 0, 1) : 1;
       clip.fadeIn = Math.max(0, +c.fadeIn || 0);
       clip.fadeOut = Math.max(0, +c.fadeOut || 0);
+      clip.mute = !!c.mute;
       return clip;
     });
   }
@@ -3263,8 +3459,9 @@ function migrateAudioClips(data, songs, lanes) {
 }
 
 function applyProject(data) {
-  if (!data || ![3, 4, 5, 6, 7, 8].includes(data.version)) { setStatus('File dự án không hợp lệ.'); return; }
+  if (!data || ![3, 4, 5, 6, 7, 8, 9].includes(data.version)) { setStatus('File dự án không hợp lệ.'); return; }
   pause();
+  audioSongId = null;
   state.ppsInit = false; // nạp xong tính lại zoom khớp nội dung
   state.fps = data.fps || 30;
   $('fpsSel').value = String(state.fps);
@@ -3276,19 +3473,24 @@ function applyProject(data) {
   state.showAllFolders = !!data.showAllFolders;
   const chk = $('showAllChk'); if (chk) chk.checked = state.showAllFolders;
   const rh = $('rowHRange'); if (rh) rh.value = state.rowH;
+  // v≤8: songs/audioClips/lanes là GLOBAL — migrate gắn về ĐÚNG MỘT bài (bài active), các bài khác TRỐNG
+  const legacyActive = data.version <= 8 ? (() => {
+    const songs = (Array.isArray(data.songs) ? data.songs : []).map((s) => ({
+      id: s.id || nid(), name: s.name || 'Bài', path: s.path || '',
+      duration: s.duration || 0, size: s.size || 0, peaks: null, decoding: false
+    }));
+    const lanes = (Array.isArray(data.lanes) && data.lanes.length)
+      ? data.lanes.filter((l) => l && l.name).map((l) => ({
+          id: l.id || nid(), name: l.name, kind: l.kind || l.name[0],
+          songId: l.songId || null, songOffset: l.songOffset || 0, songEnd: l.songEnd > 0 ? l.songEnd : 0, locked: !!l.locked
+        }))
+      : [];
+    const audioClips = migrateAudioClips(data, songs, lanes.length ? lanes : [{ id: 1, kind: 'A' }]);
+    return { songs, lanes: lanes.length ? lanes : [], audioClips, recLaneId: null };
+  })() : null;
   state.folders = (Array.isArray(data.folders) && data.folders.length)
-    ? data.folders.map(migrateFolder)
-    : [{ id: nid(), name: 'Chính', offset: 0, events: [], cues: [], color: '', hidden: false, collapsed: false }];
-  state.songs = (Array.isArray(data.songs) ? data.songs : []).map((s) => ({
-    id: s.id || nid(), name: s.name || 'Bài', path: s.path || '',
-    duration: s.duration || 0, size: s.size || 0, peaks: null, decoding: false
-  }));
-  state.lanes = (Array.isArray(data.lanes) && data.lanes.length)
-    ? data.lanes.filter((l) => l && l.name).map((l) => ({
-        id: l.id || nid(), name: l.name, kind: l.kind || l.name[0],
-        songId: l.songId || null, songOffset: l.songOffset || 0, songEnd: l.songEnd > 0 ? l.songEnd : 0, locked: !!l.locked
-      }))
-    : [];
+    ? data.folders.map((f) => migrateFolder(f, legacyActive && { ...legacyActive, isOwnFolder: f.id === data.activeFolderId }))
+    : [Object.assign({ id: nid(), name: 'Chính', offset: 0, events: [], cues: [], color: '', hidden: false, collapsed: false }, freshProjectData())];
   state.songIndex = -1;
   state.autoAdvance = data.autoAdvance !== false;
   $('autoAdvChk').checked = state.autoAdvance;
@@ -3298,27 +3500,20 @@ function applyProject(data) {
   state.sel = null;
   state.selClipId = null;
   state.clipboardAudio = null;
-  renderSongs();
   state.activeFolderId = state.folders.some((f) => f.id === data.activeFolderId)
     ? data.activeFolderId : state.folders[0].id;
-  refreshAll();
-  ensureLanesForProject();
-  renderLanes();
-  // dự án cũ (<v7): gắn bài đầu vào lane A đầu cho tiện — v7 giữ đúng như đã lưu
-  if (data.version < 7) {
+  // NẠP ĐÚNG bài được chọn: toàn bộ songs/instances/lanes/playback state lấy từ folder đó
+  const active = state.folders.find((f) => f.id === state.activeFolderId);
+  activateProject(active);
+  if (data.version <= 7 && legacyActive) {
     const aLane = state.lanes.find((l) => l.kind === 'A');
-    if (aLane && !aLane.songId && state.songs[0]) aLane.songId = state.songs[0].id;
+    if (aLane && state.lanes.some((l) => l.songId) === false && legacyActive.songs[0] && !state.audioClips.length) {
+      // dự án rất cũ: nhạc gắn trên lane → migrateAudioClips đã tạo instance; không cần gì thêm
+    }
   }
-  // AUDIO INSTANCE: v8 đọc đúng danh sách đã lưu; v≤7 migrate từ lane.songId/songOffset.
-  // Sau đó mọi instance của bài có duration sẵn → chuẩn hóa range (srcEnd=0 → full, vượt → kẹp).
-  state.audioClips = migrateAudioClips(data, state.songs, state.lanes);
-  state.audioClips.forEach((c) => {
-    const m = /^au(\d+)$/.exec(String(c.id));
-    if (m) idSeq = Math.max(idSeq, Number(m[1]));   // id mới không đụng id instance đã có
-  });
-  state.songs.forEach((s) => refreshClipBounds(s));
-  // nạp lại waveform các bài
-  state.songs.forEach((s) => { if (s.path) { decodeWaveform(s); } });
+  refreshAll();
+  renderProps();
+  updateSelBar();
   const st = data.settings || {};
   if (st.listenPort) { state.listenPort = st.listenPort; $('listenPort').value = st.listenPort; window.hs.setListenPort(st.listenPort); }
   if (st.targetHost) { state.target.host = st.targetHost; $('targetHost').value = st.targetHost; }
@@ -3326,17 +3521,8 @@ function applyProject(data) {
   if (st.filterPreset) { state.filterPreset = st.filterPreset; $('filterSel').value = st.filterPreset; $('filterRegex').style.display = st.filterPreset === 'custom' ? 'block' : 'none'; }
   if (st.filterRegex !== undefined) { state.filterRegex = st.filterRegex; $('filterRegex').value = st.filterRegex; }
   if (st.recMode) { state.recMode = st.recMode; const el = document.querySelector(`input[name="recMode"][value="${st.recMode}"]`); if (el) el.checked = true; }
-  if (data.recLaneId && state.lanes.some((l) => l.id === data.recLaneId)) {
-    state.recLaneId = data.recLaneId;
-    fillRecLaneSel();
-  }
   $('filterHint').textContent = filterDescription();
-  if (typeof data.songIndex === 'number' && data.songIndex >= 0 && data.songIndex < state.songs.length) {
-    activateSong(data.songIndex);
-  } else {
-    updateAudioName();
-  }
-  setStatus(`Đã nạp dự án: ${state.folders.length} thư mục, ${state.songs.length} bài.`);
+  setStatus(`Đã nạp dự án: ${state.folders.length} bài — mỗi bài dữ liệu độc lập (v${data.version}).`);
 }
 
 let projPath = null; // file dự án đang mở — ⌘S lưu thẳng vào đây
@@ -3384,12 +3570,7 @@ function newProjectDialog() {
   audio.pause();
   audio.removeAttribute('src');
   audio.load();
-  addLane('V', true);
-  addLane('V', true);
-  addLane('V', true);
-  addLane('A', true);
-  addLane('R', true);
-  addFolder();
+  addFolder();                // addFolder tự gắn bộ dữ liệu TRỐNG riêng + dựng lane mặc định
   renderSongs();
   updateAudioName();
   refreshAll();
@@ -3413,15 +3594,16 @@ document.addEventListener('keydown', (e) => {
 });
 
 function selectAllCues() {
-  const set = new Set();
-  state.folders.forEach((f) => f.events.forEach((ev) => set.add(ev)));
+  // CHỈ chọn cue của bài đang mở — không đụng cue của bài khác (project isolation)
+  const f = curFolder();
+  const set = new Set(f ? f.events : []);
   state.multiSel = set;
   state.sel = [...set].slice(-1)[0] || null;
   state.selClipId = null;
   state.selAudioLaneId = null;
   renderFolders();
   updateSelBar();
-  flashStatus(`Đã chọn ${set.size} cue.`);
+  flashStatus(`Đã chọn ${set.size} cue của bài "${f ? f.name : '?'}".`);
 }
 
 /* ================= Khởi động ================= */
@@ -3449,10 +3631,289 @@ function selectAllCues() {
     const saved = localStorage.getItem(AUTOSAVE_KEY);
     if (saved) {
       const data = JSON.parse(saved);
-      if ([3, 4, 5, 6, 7, 8].includes(data.version)) { applyProject(data); restored = true; }
+      if ([3, 4, 5, 6, 7, 8, 9].includes(data.version)) { applyProject(data); restored = true; }
     }
   } catch (_) { /* bỏ qua */ }
   if (!restored) refreshAll();
   audio.volume = masterVol;
   setStatus('Bật ● REC → gõ MIDI vào Resolume → cue tự ghi vào lane R. Chưa nhận OSC? Bấm "Resolume" trên thanh MIDI REC.');
+})();
+
+/* ================= MIDI REC — mô hình 404TimeCode (midir → CoreMIDI bên 404) =================
+   • Web MIDI API (Electron/macOS bật sẵn): quét thiết bị vào, note-on/off → địa chỉ OSC.
+   • PAD Tự động: địa chỉ từ MẪU (/midi/note/{n} — {n}=note 0-127, {c}=kênh 1-16).
+   • PAD Học từ OSC vào: pad chưa có địa chỉ riêng → nhận message OSC vào GẦN NHẤT làm địa chỉ
+     (giống "đơn tơ địa chỉ" của 404: bấm pad trên Resolume → cue học địa chỉ).
+   • Bounce: bấm pad (note-on) bắn OSC NGAY theo địa chỉ của pad — mọi lúc, không cần REC.
+   • Ghi cue: khi REC BẬT + đang phát → note-on đặt cue bắn (mode Trigger), note-off kéo dài
+     cue (mode Piano — "giữ/nhả" như 404). */
+const MIDI = {
+  access: null,          // WebMIDIAccess
+  inputs: [],            // [{id, name, device}]
+  watched: new Set(),    // device id đang lắng nghe
+  padMap: new Map(),     // noteKey "n<note>c<ch>" → địa chỉ OSC đã học (pad mode learn)
+  notes: new Map(),      // noteKey → {ev, folderId} đang GIỮ (để note-off tính duration Piano)
+  lastOscIn: null        // {address, args} OSC vào gần nhất — cho pad learn
+};
+
+function midiNoteKey(note, ch) { return 'n' + note + 'c' + (ch || 1); }
+
+/* Mẫu địa chỉ → địa chỉ thật: {n} note 0-127, {c} kênh 1-16 */
+function midiAddrFor(note, ch) {
+  const tpl = state.midiTpl || '/midi/note/{n}';
+  return tpl.replace(/\{n\}/g, String(note)).replace(/\{c\}/g, String(ch || 1));
+}
+
+async function midiScan() {
+  if (!navigator.requestMIDIAccess) {
+    setStatus('Trình duyệt này không hỗ trợ Web MIDI.');
+    return;
+  }
+  try {
+    MIDI.access = await navigator.requestMIDIAccess({ sysex: false });
+  } catch (e) {
+    setStatus('Không mở được MIDI: ' + e.message);
+    return;
+  }
+  const sel = $('mrMidiDevice');
+  const prev = state.midiDeviceId || sel.value;
+  sel.innerHTML = '<option value="">— không có —</option>';
+  MIDI.inputs = [];
+  MIDI.access.inputs.forEach((inp) => {
+    MIDI.inputs.push(inp);
+    const o = document.createElement('option');
+    o.value = inp.id;
+    o.textContent = inp.name || ('MIDI ' + inp.id);
+    o.title = inp.name || '';
+    sel.appendChild(o);
+  });
+  sel.value = [...sel.options].some((o) => o.value === prev) ? prev : '';
+  state.midiDeviceId = sel.value || null;
+  midiWatch();
+  const n = MIDI.inputs.length;
+  flashStatus(n ? `MIDI: tìm thấy ${n} thiết bị vào — chọn thiết bị rồi REC BẬT + gõ pad.` : 'MIDI: không tìm thấy thiết bị nào vào — kiểm tra kết nối đàn/pad.');
+}
+
+/* lắng nghe thiết bị đang chọn (bỏ theo dõi thiết bị khác) */
+function midiWatch() {
+  const want = state.midiDeviceId;
+  MIDI.inputs.forEach((inp) => {
+    if (inp.id === want && !MIDI.watched.has(inp.id)) {
+      inp.onmidimessage = onMidiMessage;
+      MIDI.watched.add(inp.id);
+    } else if (inp.id !== want) {
+      inp.onmidimessage = null;
+      MIDI.watched.delete(inp.id);
+    }
+  });
+  if (MIDI.access && MIDI.access.statechange) {
+    // cắm/rút thiết bị → tự quét lại
+    MIDI.access.onstatechange = () => { midiScan(); };
+  }
+}
+
+function onMidiMessage(ev) {
+  const [status, d1, d2] = ev.data;
+  const type = status & 0xf0;      // 0x90 note-on, 0x80 note-off, 0xB0 CC…
+  const ch = (status & 0x0f) + 1;  // 1-16
+  if (type === 0x90 && d2 > 0) midiNoteOn(d1, ch, d2);
+  else if (type === 0x80 || (type === 0x90 && d2 === 0)) midiNoteOff(d1, ch);
+  /* CC/aftertouch: bỏ qua — REC MIDI của 404 cũng chỉ nhốt note pad */
+}
+
+function padAddr(note, ch) {
+  const key = midiNoteKey(note, ch);
+  if (state.midiPadMode === 'learn' && MIDI.padMap.has(key)) return MIDI.padMap.get(key);
+  return midiAddrFor(note, ch);   // auto: luôn theo mẫu
+}
+
+function midiNoteOn(note, ch, vel) {
+  const addr = padAddr(note, ch);
+  $('mrLast').textContent = `MIDI n${note} ch${ch} → ${addr}`;
+  $('mrLast').title = $('mrLast').textContent;
+  const badge = $('mrRx');
+  badge.textContent = 'MIDI ●';
+  badge.classList.add('flash');
+  setTimeout(() => badge.classList.remove('flash'), 120);
+  // BOUNCE: bắn OSC ngay theo địa chỉ pad (mặc định bật) — như bấm pad trong Resolume
+  if (state.midiBounce) sendOsc(addr, [1]);
+  // REC: tạo/đặt cue tại playhead
+  if (state.recArmed && state.playing) {
+    const f = curFolder();
+    if (!f) { setStatus('Chưa có bài để ghi — nhấn ＋ Bài.'); return; }
+    const rl = recLane();
+    if (rl && rl.locked) { setStatus(`Lane ghi ${rl.name} đang khóa — mở khóa để ghi.`); return; }
+    const def = findOrMakeDef(f, addr, [1]);
+    if (!def.name) def.name = 'Pad ' + note;
+    const cue = makePlacement(Math.floor(state.frame) - f.offset, def.id);
+    cue.lane = rl ? rl.name : 'V1';
+    cue.duration = 0;                    // note-off sẽ kéo dài (Piano) — 404 giữ/nhả
+    insertCue(f, cue);
+    state.selClipId = null;
+    refreshAll();
+    MIDI.notes.set(midiNoteKey(note, ch), { ev: cue, folderId: f.id });
+    flashStatus(`MIDI ghi cue @ ${tcString(state.frame, state.fps)} → ${cue.lane}  ${addr}`);
+  }
+}
+
+function midiNoteOff(note, ch) {
+  const key = midiNoteKey(note, ch);
+  const held = MIDI.notes.get(key);
+  if (held) {
+    // kéo dài cue đúng khoảng GIỮ pad (mode Piano của 404)
+    const f = state.folders.find((x) => x.id === held.folderId);
+    if (f && f.events.includes(held.ev)) {
+      const dur = Math.max(0, Math.floor(state.frame) - f.offset - held.ev.frame);
+      if (dur > 0) held.ev.duration = dur;
+      refreshAll();
+      scheduleAutosave();
+    }
+    MIDI.notes.delete(key);
+    if (state.midiBounce) {
+      // nhả pad = thả nút Piano trong Resolume → gửi 0
+      sendOsc(padAddr(note, ch), [0]);
+    }
+  } else if (state.midiBounce) {
+    sendOsc(padAddr(note, ch), [0]);
+  }
+}
+
+/* PAD LEARN — "đơn tơ địa chỉ" kiểu 404: đang ở chế độ Học + có CUE đang chọn
+   → OSC vào gần nhất tự thành ĐỊA CHỈ của cue đó (bấm clip trong Resolume là xong).
+   Đồng thời nhớ OSC vào cuối cùng cho pad map (note bấm sau dùng địa chỉ này). */
+function midiPadLearn(address, args) {
+  MIDI.lastOscIn = { address, args: args || [] };
+  if (state.midiPadMode !== 'learn') return;
+  const cue = state.sel;
+  if (!cue) return;
+  const f = state.folders.find((fo) => fo.events.includes(cue));
+  if (!f) return;
+  let def = f.cues.find((c) => c.id === cue.cueId);
+  if (!def) return;
+  if (def.address === address) return;      // đã đúng — khỏi đụng (không spam undo)
+  noteChange();                             // học địa chỉ phải HOÀN TÁC được (như 404: Cmd+Z trả về gốc)
+  def.address = address;
+  if (Array.isArray(args) && args.length) def.args = args.slice(0, 4);
+  if (!def.name || /^Pad \d+$/.test(def.name)) def.name = address.split('/').filter(Boolean).slice(-1)[0] || def.name;
+  renderFolders();
+  renderProps();
+  flashStatus(`Đã học địa chỉ: ${address} → cue "${def.name}" (Cmd+Z hoàn tác).`);
+}
+
+/* ---------- UI gắn kết ---------- */
+$('mrMidiScan').addEventListener('click', midiScan);
+$('mrMidiDevice').addEventListener('change', (e) => {
+  state.midiDeviceId = e.target.value || null;
+  midiWatch();
+  scheduleAutosave();
+});
+$('mrSource').addEventListener('change', (e) => {
+  state.recSource = e.target.value === 'osc' ? 'osc' : 'midi';
+  const midiOnly = state.recSource === 'midi';
+  $('mrBounce').parentElement.style.display = midiOnly ? '' : 'none';
+  $('mrPadBox').style.display = midiOnly ? '' : 'none';
+  $('mrTpl').style.display = midiOnly ? '' : 'none';
+  $('mrMidiBox').style.display = midiOnly ? '' : 'none';
+  $('mrMidiScan').style.display = midiOnly ? '' : 'none';
+  scheduleAutosave();
+  flashStatus(state.recSource === 'midi'
+    ? 'REC nguồn MIDI: bấm pad trên đàn → ghi cue (bounce OSC bật).'
+    : 'REC nguồn OSC: Resolume gửi về :7000 → ghi cue theo bộ lọc.');
+});
+$('mrPadMode').addEventListener('change', (e) => {
+  state.midiPadMode = e.target.value === 'learn' ? 'learn' : 'auto';
+  scheduleAutosave();
+  flashStatus(state.midiPadMode === 'learn'
+    ? 'PAD Học: cue đang chọn + bấm clip trong Resolume → địa chỉ OSC vào gần nhất thành địa chỉ pad.'
+    : 'PAD Tự động: địa chỉ pad sinh từ mẫu — sửa trong ô MẪU.');
+});
+$('mrTpl').addEventListener('change', (e) => {
+  const v = e.target.value.trim();
+  state.midiTpl = v.startsWith('/') ? v : '/midi/note/{n}';
+  e.target.value = state.midiTpl;
+  scheduleAutosave();
+});
+$('mrBounce').addEventListener('change', (e) => {
+  state.midiBounce = e.target.checked;
+  scheduleAutosave();
+});
+$('mrRecMode').addEventListener('change', (e) => {
+  state.recMode = e.target.value === 'overwrite' ? 'overwrite' : 'overdub';
+  document.querySelectorAll('input[name="recMode"]').forEach((r) => { r.checked = r.value === state.recMode; });
+  scheduleAutosave();
+});
+/* đồng bộ 2 thanh recMode (panel cài đặt ↔ thanh MIDI REC) */
+document.querySelectorAll('input[name="recMode"]').forEach((r) => {
+  r.addEventListener('change', (e) => {
+    if (e.target.checked) {
+      state.recMode = e.target.value;
+      const mr = $('mrRecMode');
+      if (mr) mr.value = state.recMode;
+      scheduleAutosave();
+    }
+  });
+});
+
+/* khởi động MIDI: quét 1 lần sau khi app mở (không chặn UI) */
+setTimeout(() => { midiScan(); }, 800);
+
+/* ================= CỬA SỔ SMALL (MINI) — 1 playback engine duy nhất =================
+   • Cửa sổ chính là engine: Mini chỉ NHẬN broadcast trạng thái + GỬI lệnh về đây.
+   • Mini KHÔNG tự phát nhạc, KHÔNG gửi OSC trực tiếp — mọi thứ đi qua engine này. */
+(function setupMiniBridge() {
+  if (!window.hs || !window.hs.sendUiState) return;   // preload cũ — bỏ qua an toàn
+
+  const btnMini = $('btnMini');
+  btnMini.addEventListener('click', () => window.hs.openMini());
+  if (window.hs.onMiniState) window.hs.onMiniState((s) => {
+    btnMini.classList.toggle('active', !!(s && s.open));
+  });
+
+  // BROADCAST trạng thái (10Hz — đủ mượt cho timecode, nhẹ cho IPC)
+  let lastSig = '';
+  setInterval(() => {
+    captureActiveProject();       // pstate mỗi bài luôn tươi trong danh sách broadcast
+    const f = curFolder();
+    const st = {
+      frame: Math.round(state.frame),
+      fps: state.fps,
+      playing: state.playing,
+      contentEnd: totalFrames(),
+      curFolderId: f ? f.id : null,
+      // SMALL chỉ cần DANH SÁCH BÀI + bài đang mở + trạng thái phát — không cần timeline
+      folders: state.folders.map((fo) => ({
+        id: fo.id, name: fo.name, color: fo.color,
+        cues: (fo.events || []).length, songs: (fo.songs || []).length
+      })),
+      osc: { listening: !!(window.__oscListening), port: state.listenPort },
+      stats: { rx: lastStats.rx, tx: lastStats.tx }
+    };
+    // GỬI LUÔN mỗi tick (10Hz, payload nhỏ): cửa sổ SMALL có thể mở BẤT KỲ LÚC NÀO —
+    // nếu chỉ gửi khi thay đổi, SMALL mở sau sẽ không bao giờ nhận được state đầu tiên
+    window.hs.sendUiState(st);
+  }, 100);
+
+  // NHẬN LỆNH từ Mini → thực thi trên engine DUY NHẤT này
+  if (window.hs.onMiniCmd) window.hs.onMiniCmd((cmd) => {
+    if (!cmd || !cmd.type) return;
+    if (cmd.type === 'play') { if (!state.playing) play(); return; }
+    if (cmd.type === 'pause') { if (state.playing) pause(); return; }
+    if (cmd.type === 'play-pause') { togglePlay(); return; }
+    if (cmd.type === 'stop') { stop(); setStatus('Mini: đã dừng.'); return; }
+    if (cmd.type === 'home') { setFrame(0); updateTc(); return; }
+    if (cmd.type === 'select-project') {
+      // chọn bài ở SMALL → cửa sổ chính mở ĐÚNG bài đó (chuyển an toàn: pause trước khi nạp)
+      switchProject(cmd.folderId);
+      return;
+    }
+    if (cmd.type === 'trigger-cue') {
+      const f = state.folders.find((fo) => fo.id === cmd.folderId);
+      const d = f && f.cues.find((c) => c.id === cmd.cueId);
+      if (!d) { setStatus('Mini: không tìm thấy cue.'); return; }
+      if (!d.address) { setStatus(`Mini: cue "${d.name}" chưa có địa chỉ OSC.`); return; }
+      sendOsc(d.address, d.args);       // engine chính là nguồn gửi OSC duy nhất
+      flashStatus(`Mini đã bắn cue: ${d.name} → ${d.address}`);
+      return;
+    }
+  });
 })();

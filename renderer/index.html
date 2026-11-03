@@ -79,6 +79,7 @@
         <option value="2">2×</option>
       </select>
       <button id="btnRec" class="rec" title="Bật/tắt ghi (R) — bật REC là tự phát + ghi">● REC</button>
+      <button id="btnMini" title="Mở cửa sổ SMALL (mini) — điều khiển từ xa, chung engine với cửa sổ này">⧉ SMALL</button>
     </div>
   </header>
 
@@ -167,6 +168,7 @@
           <button id="btnSelCut" title="Cắt (⌘X)">Cắt</button>
           <button id="btnSelPaste" title="Dán tại thanh đò (⌘V)">Dán</button>
           <button id="btnSelHide" title="Ẩn/hiện cue đang chọn (không gửi OSC)">⊘ Ẩn</button>
+          <button id="btnSelMute" title="Mute/bỏ mute clip nhạc đang chọn (theo instance)">🔇 Mute</button>
           <button id="btnSelDel" class="danger" title="Xóa (Del)">Xóa</button>
           <button id="btnSelNone" title="Bỏ chọn">Bỏ chọn</button>
         </span>
@@ -185,6 +187,32 @@
       <div id="midiRecBar">
         <span class="mr-label">▼ MIDI REC</span>
         <button id="mrRec" class="rec">● REC TẮT</button>
+        <label class="mr-lane">NGUỒN
+          <select id="mrSource" title="Nguồn ghi: đàn MIDI (Web MIDI) hoặc OSC gửi tới từ Resolume">
+            <option value="midi">MIDI</option>
+            <option value="osc">Resolume (OSC)</option>
+          </select>
+        </label>
+        <label class="mr-lane" id="mrMidiBox" title="Thiết bị MIDI vào (đàn/pad controller)">MIDI IN
+          <select id="mrMidiDevice"><option value="">— quét thiết bị —</option></select>
+        </label>
+        <button id="mrMidiScan" title="Quét lại thiết bị MIDI">⟳ MIDI</button>
+        <label class="mr-lane" id="mrPadBox" title="Cách gán địa chỉ OSC cho từng pad/note">PAD
+          <select id="mrPadMode">
+            <option value="auto">Tự động (mẫu OSC)</option>
+            <option value="learn">Học từ OSC vào</option>
+          </select>
+        </label>
+        <input id="mrTpl" class="mr-tpl" value="/midi/note/{n}" title="Mẫu địa chỉ OSC cho pad — {n} = số note (0-127), {c} = kênh MIDI (1-16). VD: /composition/layers/{n}/clips/1/connect">
+        <label class="mr-check" title="Bấm pad (kể cả khi không ghi) là bắn OSC ngay theo địa chỉ của pad đó">
+          <input type="checkbox" id="mrBounce" checked> Bấm pad bắn OSC
+        </label>
+        <label class="mr-lane">GHI
+          <select id="mrRecMode" title="Ghi thêm: giữ cue cũ · Ghi đè: xóa cue cũ trong lane ghi từ điểm phát">
+            <option value="overdub">Ghi thêm</option>
+            <option value="overwrite">Ghi đè</option>
+          </select>
+        </label>
         <label class="mr-lane">LANE GHI
           <select id="mrLane"></select>
         </label>
@@ -277,8 +305,9 @@
           <button id="btnApplyPort">Áp dụng</button>
         </div>
         <div class="row">
-          <label>Trạng thái</label>
-          <span id="oscStatus" class="pill off">…</span>
+          <label>OSC</label>
+          <button id="btnOscToggle" title="Bật/tắt cổng nghe OSC. Khi TẮT app không nghe mạng gì cả (vẫn gửi cue được).">▶ Bật OSC</button>
+          <span id="oscStatus" class="pill off">TẮT</span>
         </div>
         <div class="row">
           <label>Gửi tới</label>

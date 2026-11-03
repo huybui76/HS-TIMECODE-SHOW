@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <title>HS TIMECODE · Mini</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <link rel="stylesheet" href="mini.css">
+</head>
+<body>
+  <header id="miniHead">
+    <span class="brand">HS<span>MINI</span></span>
+    <span class="spacer"></span>
+    <button id="miniPin" class="pin on" title="Always on Top — cửa sổ luôn nổi trên các cửa sổ khác">📌</button>
+    <button id="miniMain" title="Chuyển về cửa sổ chính">⇱ Cửa sổ chính</button>
+  </header>
+
+  <section id="miniTc">
+    <div class="tc-label">HIỆN TẠI</div>
+    <div id="miniTcText">00:00:00:00</div>
+    <div id="miniStatus" class="status idle">■ DỪNG</div>
+  </section>
+
+  <section id="miniProgress">
+    <div id="miniBar"><div id="miniBarFill"></div></div>
+  </section>
+
+  <section id="miniTransport">
+    <button id="mPlay" class="big play" title="PLAY — chạy bài đang chọn">▶</button>
+    <button id="mPause" class="big pause" title="PAUSE — tạm dừng">⏸</button>
+    <button id="mStop" class="big stop" title="STOP — dừng về đầu">■</button>
+  </section>
+
+  <section id="miniProjects">
+    <div class="proj-head"><span>DANH SÁCH BÀI</span><span class="hint">bấm để mở bài (đồng bộ cửa sổ chính)</span></div>
+    <div id="mProjList" class="proj-list"></div>
+  </section>
+
+  <footer id="miniFoot">
+    <span id="mOsc" class="badge off">OSC ● TẮT</span>
+    <span id="mRx" class="badge">RX 0</span>
+    <span id="mTx" class="badge">TX 0</span>
+    <span class="spacer"></span>
+    <span class="hint">1 engine — đồng bộ với cửa sổ chính</span>
+  </footer>
+
+  <script src="mini.js"></script>
+</body>
+</html>
