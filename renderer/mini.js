@@ -1,5 +1,5 @@
 'use strict';
-/* ===== HS TIMECODE · MINI — bảng điều khiển CHỌN BÀI + PLAYBACK =====
+/* ===== HS TIMECODE · MINI — điều khiển từ xa: 3 ô thời gian + playback + danh sách bài 2 cột =====
    • KHÔNG timeline, KHÔNG waveform, KHÔNG công cụ chỉnh sửa.
    • Mini chỉ HIỂN THỊ trạng thái broadcast từ cửa sổ chính và GỬI lệnh về đó (window.hs.miniCmd).
    • Toàn bộ playback/OSC/project data do engine DUY NHẤT ở cửa sổ chính thực thi. */
@@ -10,6 +10,7 @@ const state = {
   fps: 30,
   playing: false,
   contentEnd: 0,
+  next: null,             // {name, frame} cue kế tiếp (broadcast từ engine)
   folders: [],           // [{id, name, color, cues, songs}]
   curFolderId: null,     // bài đang mở ở cửa sổ chính (đồng bộ 2 chiều)
   alwaysOnTop: true,
@@ -34,6 +35,7 @@ if (window.hs.onUiState) window.hs.onUiState((st) => {
   state.fps = st.fps || 30;
   state.playing = !!st.playing;
   state.contentEnd = st.contentEnd || 0;
+  state.next = st.next || null;
   state.folders = Array.isArray(st.folders) ? st.folders : [];
   state.curFolderId = st.curFolderId || null;
   if (st.osc) { state.oscListening = st.osc.listening; state.oscPort = st.osc.port; }
@@ -48,26 +50,46 @@ if (window.hs.onMiniSettings) window.hs.onMiniSettings((s) => {
 if (window.hs.onStatus) window.hs.onStatus((s) => {
   state.oscListening = !!s.listening;
   state.oscPort = s.port;
-  renderFoot();
 });
 if (window.hs.onStats) window.hs.onStats((s) => {
   state.rx = s.rx; state.tx = s.tx;
-  renderFoot();
 });
 
 /* ---------- render ---------- */
 function render() {
   $('miniTcText').textContent = tcString(state.frame, state.fps);
+  // trạng thái ở hàng trên: TẠM DỪNG / ĐANG PHÁT
   const st = $('miniStatus');
-  if (state.playing) { st.textContent = '● ĐANG PHÁT'; st.className = 'status play'; }
-  else { st.textContent = '⏸ TẠM DỪNG'; st.className = 'status pause'; }
+  if (state.playing) { st.textContent = 'ĐANG PHÁT'; st.className = 'stv play'; }
+  else { st.textContent = 'TẠM DỪNG'; st.className = 'stv pause'; }
   $('mPlay').disabled = state.playing;
   $('mPause').disabled = !state.playing;
+
+  // NEXT — cue kế tiếp của bài đang chạy: "Next: tên cue · cue n/total" + timecode đếm ngược
+  const nName = $('miniNextName'), nLabel = $('miniNextLabel'), nIdx = $('miniNextIdx'), nTc = $('miniNextTc');
+  if (state.next && state.next.frame > state.frame) {
+    nTc.textContent = tcString(state.next.frame - state.frame, state.fps);
+    nLabel.textContent = state.next.name || 'cue';
+    nIdx.textContent = state.next.idx ? `cue ${state.next.idx}/${state.next.total || '?'}` : '';
+    nTc.classList.remove('next-none');
+    nName.classList.remove('none');
+  } else {
+    nTc.textContent = '--:--:--:--';
+    nLabel.textContent = 'không còn cue';
+    nIdx.textContent = '';
+    nTc.classList.add('next-none');
+    nName.classList.add('none');
+  }
+
+  // CÒN LẠI — đến điểm ngoài cùng của timeline
+  $('miniRem').textContent = state.contentEnd > 0
+    ? tcString(Math.max(0, state.contentEnd - state.frame), state.fps)
+    : '00:00:00:00';
+
   // thanh vị trí: playhead / cuối nội dung — CHỈ SỐ, không phải timeline
   const pct = state.contentEnd > 0 ? Math.min(100, (state.frame / state.contentEnd) * 100) : 0;
   $('miniBarFill').style.width = pct.toFixed(2) + '%';
   renderProjects();
-  renderFoot();
 }
 
 function renderPin() {
@@ -78,10 +100,11 @@ function renderPin() {
     : 'Always on Top đang TẮT — bấm để bật';
 }
 
-/* danh sách BÀI (project) — highlight bài đang mở; ● bài đang chạy */
+/* danh sách BÀI — lưới 2 CỘT, head hiện SỐ BÀI; bài chọn nền cam nhạt nổi bật; meta luôn hiện cue/nhạc */
 function renderProjects() {
   const list = $('mProjList');
-  const sig = state.folders.map((f) => `${f.id}|${f.name}|${f.cues}|${f.songs}`).join('§') + '#' + state.curFolderId + '#' + state.playing;
+  $('miniProjCount').textContent = `(${state.folders.length})`;
+  const sig = state.folders.map((f) => `${f.id}|${f.name}|${f.color}|${f.cues}|${f.songs}`).join('§') + '#' + state.curFolderId + '#' + state.playing;
   if (list.__sig === sig) return;
   list.__sig = sig;
   list.innerHTML = '';
@@ -92,22 +115,33 @@ function renderProjects() {
     list.appendChild(em);
     return;
   }
-  state.folders.forEach((f) => {
+  state.folders.forEach((f, i) => {
     const row = document.createElement('button');
     const isOpen = f.id === state.curFolderId;
     row.className = 'proj-row' + (isOpen ? ' open' : '') + (isOpen && state.playing ? ' running' : '');
-    if (f.color) row.style.borderLeft = '3px solid ' + f.color;
+    if (f.color && !isOpen) row.style.borderLeftColor = f.color;
+    const num = document.createElement('i');
+    num.className = 'pnum';
+    num.textContent = i + 1;                       // SỐ THỨ TỰ bài
+    const col = document.createElement('span');
+    col.className = 'pcol';
     const nm = document.createElement('span');
     nm.className = 'pname';
     nm.textContent = f.name;
     const meta = document.createElement('span');
     meta.className = 'pmeta';
+    // meta LUÔN hiện đủ số cue · số nhạc — trạng thái thêm cuối dòng
     meta.textContent = `${f.cues} cue · ${f.songs} nhạc`;
-    const badge = document.createElement('span');
-    badge.className = 'pbadge';
-    if (isOpen && state.playing) { badge.textContent = '● ĐANG CHẠY'; badge.classList.add('run'); }
-    else if (isOpen) { badge.textContent = 'ĐANG MỞ'; badge.classList.add('sel'); }
-    row.append(nm, meta, badge);
+    if (isOpen && state.playing) {
+      const tag = document.createElement('span');
+      tag.className = 'run-tag';
+      tag.textContent = ' · ● ĐANG CHẠY';
+      meta.appendChild(tag);
+    } else if (isOpen) {
+      meta.append(' · ĐANG MỞ');
+    }
+    col.append(nm, meta);
+    row.append(num, col);
     row.title = `Mở "${f.name}" — cửa sổ chính sẽ chuyển sang bài này`;
     row.addEventListener('click', () => {
       // chọn bài ở SMALL → engine chính chuyển project (2 chiều)
@@ -117,20 +151,10 @@ function renderProjects() {
   });
 }
 
-function renderFoot() {
-  const osc = $('mOsc');
-  if (state.oscListening === null) { osc.textContent = 'OSC ● --'; osc.className = 'badge'; }
-  else if (state.oscListening) { osc.textContent = 'OSC ● ' + state.oscPort; osc.className = 'badge on'; }
-  else { osc.textContent = 'OSC ● TẮT'; osc.className = 'badge off'; }
-  $('mRx').textContent = 'RX ' + state.rx;
-  $('mTx').textContent = 'TX ' + state.tx;
-}
-
 /* ---------- gửi lệnh về engine chính ---------- */
 $('mPlay').addEventListener('click', () => window.hs.miniCmd({ type: 'play' }));
 $('mPause').addEventListener('click', () => window.hs.miniCmd({ type: 'pause' }));
 $('mStop').addEventListener('click', () => window.hs.miniCmd({ type: 'stop' }));
-$('miniMain').addEventListener('click', () => window.hs.miniFocusMain());
 $('miniPin').addEventListener('click', () => {
   state.alwaysOnTop = !state.alwaysOnTop;
   renderPin();

@@ -7,17 +7,31 @@
   <link rel="stylesheet" href="mini.css">
 </head>
 <body>
-  <header id="miniHead">
-    <span class="brand">HS<span>MINI</span></span>
+  <!-- thanh trên trống — chỉ để kéo di chuyển cửa sổ -->
+  <div id="miniTopbar" title="Kéo để di chuyển cửa sổ"></div>
+
+  <!-- 1 hàng gọn: TẠM DỪNG trái · GHIM phải -->
+  <section id="miniTopRow">
+    <span id="miniStatus" class="stv pause">TẠM DỪNG</span>
     <span class="spacer"></span>
     <button id="miniPin" class="pin on" title="Always on Top — cửa sổ luôn nổi trên các cửa sổ khác">📌</button>
-    <button id="miniMain" title="Chuyển về cửa sổ chính">⇱ Cửa sổ chính</button>
-  </header>
+  </section>
 
-  <section id="miniTc">
-    <div class="tc-label">HIỆN TẠI</div>
+  <!-- timecode — màu cam, căng giữa -->
+  <section id="miniCur">
     <div id="miniTcText">00:00:00:00</div>
-    <div id="miniStatus" class="status idle">■ DỪNG</div>
+  </section>
+
+  <!-- NEXT (cue kế tiếp của bài) + CÒN LẠI — chung 1 hàng, căn giữa -->
+  <section id="miniInfo">
+    <div class="info-cell">
+      <div id="miniNextName" class="info-name"><b>Next:</b> <span id="miniNextLabel">không còn cue</span><span id="miniNextIdx" class="cue-idx"></span></div>
+      <div id="miniNextTc" class="info-tc next">--:--:--:--</div>
+    </div>
+    <div class="info-cell">
+      <div class="cell-label">CÒN LẠI</div>
+      <div class="info-tc rem" id="miniRem">00:00:00:00</div>
+    </div>
   </section>
 
   <section id="miniProgress">
@@ -30,18 +44,11 @@
     <button id="mStop" class="big stop" title="STOP — dừng về đầu">■</button>
   </section>
 
+  <!-- DANH SÁCH BÀI — luôn 2 cột, thấy đầu danh sách, còn lại cuộn -->
   <section id="miniProjects">
-    <div class="proj-head"><span>DANH SÁCH BÀI</span><span class="hint">bấm để mở bài (đồng bộ cửa sổ chính)</span></div>
-    <div id="mProjList" class="proj-list"></div>
+    <div class="proj-head"><span>DANH SÁCH BÀI</span><span id="miniProjCount" class="proj-cnt">(0)</span></div>
+    <div id="mProjList" class="proj-grid"></div>
   </section>
-
-  <footer id="miniFoot">
-    <span id="mOsc" class="badge off">OSC ● TẮT</span>
-    <span id="mRx" class="badge">RX 0</span>
-    <span id="mTx" class="badge">TX 0</span>
-    <span class="spacer"></span>
-    <span class="hint">1 engine — đồng bộ với cửa sổ chính</span>
-  </footer>
 
   <script src="mini.js"></script>
 </body>

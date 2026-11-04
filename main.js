@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const dgram = require('dgram');
@@ -121,6 +121,7 @@ function createWindow() {
     minHeight: 720,
     backgroundColor: '#0d0d0f',
     title: 'HS TIMECODE',
+    icon: path.join(__dirname, 'build', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -245,11 +246,12 @@ function createMiniWindow() {
     miniWin.focus();
     return;
   }
+  // Kích thước CỐ ĐỊNH mặc định 454×468 px — mở lần nào cũng đúng kích thước này
   miniWin = new BrowserWindow({
-    width: 440,
-    height: 620,
+    width: 454,
+    height: 468,
     minWidth: 340,
-    minHeight: 400,
+    minHeight: 280,
     backgroundColor: '#0d0d0f',
     title: 'HS TIMECODE · Mini',
     alwaysOnTop: miniSettings.alwaysOnTop !== false,

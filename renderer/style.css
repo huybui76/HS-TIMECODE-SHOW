@@ -136,26 +136,35 @@ body {
 .tc-controls { display: flex; gap: 10px; }
 .tc-controls label { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: 11px; }
 
-#tcDisplay {
-  flex: 1;
-  text-align: center;
-  font-family: "SF Mono", Menlo, monospace;
-  font-size: 44px;
-  font-weight: 700;
-  color: var(--accent);
-  letter-spacing: 2px;
-  text-shadow: 0 0 18px rgba(255, 138, 0, .35);
-  line-height: 1.1;
-  white-space: nowrap;
-}
-#recDot {
-  display: inline-block; width: 14px; height: 14px; border-radius: 50%;
-  background: #333; margin-left: 12px; vertical-align: middle;
-}
-#recDot.on { background: var(--red); animation: blink 1s infinite; }
-@keyframes blink { 50% { opacity: .25; } }
 
-.transport { display: flex; align-items: center; gap: 6px; }
+/* ===== Hàng điều khiển ⏮ ▶ ■ ⟲ 1× — đầu panel trái, trên tab Bài|Nhạc ===== */
+.transport-row {
+  display: flex; align-items: center; gap: 7px; padding: 9px 10px;
+  background: #17171d; border-bottom: 1px solid var(--line);
+}
+.transport-row button {
+  flex: 1; padding: 9px 0; font-size: 17px; line-height: 1;
+  border-radius: 10px; text-align: center;
+}
+.transport-row #speedSel {
+  flex: 1.15; padding: 9px 4px; font-size: 13px; font-weight: 700; text-align: center;
+}
+/* Nút DỪNG — màu đỏ nổi bật */
+#btnStop { color: #ff453a; border-color: rgba(255, 69, 58, .5); background: rgba(255, 69, 58, .08); }
+#btnStop:hover { background: rgba(255, 69, 58, .16); border-color: #ff453a; }
+/* ✂ Cắt / Cắt nhanh — nút icon (kéo chia đôi / kéo đường đứt) */
+.tlt.icon { display: inline-flex; align-items: center; justify-content: center; padding: 7px 9px; }
+.tlt.icon svg { width: 15px; height: 15px; display: block; }
+.tlt.icon.cut-split { position: relative; }
+.tlt.icon.cut-split::after {
+  content: ''; position: absolute; left: 50%; top: 4px; bottom: 4px; width: 0;
+  border-left: 1.5px dashed currentColor; opacity: .9; transform: translateX(-.75px);
+}
+.tlt.icon.cut-quick { position: relative; }
+.tlt.icon.cut-quick::after {
+  content: ''; position: absolute; left: 4px; right: 4px; bottom: 6px;
+  border-top: 1.5px dashed currentColor; opacity: .9;
+}
 button, select, input {
   background: var(--panel2);
   color: var(--text);
@@ -173,6 +182,26 @@ button.danger:hover { background: #552222; border-color: var(--red); }
 button.rec { font-weight: 700; letter-spacing: .5px; }
 button.rec.armed { background: #571c1c; border-color: var(--red); color: #ff9d9d; }
 #speedSel { padding: 6px 4px; }
+/* REC + SMALL nhỏ lại, căng phải trên topbar (thiết kế mới) */
+.topbar-push { flex: 1; }
+/* Slider RỘNG/CAO/volume — cột nhỏ gọn trên topbar */
+.sldcol { display: flex; flex-direction: column; gap: 1px; }
+.sldcol.volcol { padding-left: 9px; border-left: 1px solid #2c2c36; }
+.sld { display: flex; align-items: center; gap: 4px; }
+.sld .sldval { font: 700 9.5px "SF Mono", Menlo, monospace; color: #b9b9c5; min-width: 30px; text-align: right; }
+.sld-ic { color: #9a9aa8; font-size: 12px; width: 13px; text-align: center; }
+.sld-ic.vol { color: #9cc0ff; }
+.sld input { width: 140px; height: 8px; accent-color: #ff9f43; }
+.sld input#vol { accent-color: #4f8cff; }
+.sld-sep { width: 1px; height: 26px; background: #2c2c36; }
+#topbar #btnRec, #topbar #btnMini { padding: 4px 9px; font-size: 11px; border-radius: 7px; }
+/* Nút ⚙ cài đặt — ẩn/hiện panel KẾT NỐI OSC */
+#btnGear {
+  width: 44px; height: 40px; padding: 0; font-size: 20px; border-radius: 10px;
+  background: #1d1d25; border: 1px solid var(--line); color: var(--text);
+}
+#btnGear:hover { background: #26262d; border-color: #3a3a44; }
+#btnGear.on { background: #2b4a86; border-color: var(--blue); color: #fff; box-shadow: 0 0 12px rgba(79, 140, 255, .35); }
 
 /* ===== Layout ===== */
 main { flex: 1; display: flex; min-height: 0; }
@@ -184,6 +213,7 @@ main { flex: 1; display: flex; min-height: 0; }
   display: flex; flex-direction: column;
 }
 #center { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#oscPanel[hidden] { display: none; }
 #oscPanel {
   width: 320px; min-width: 250px;
   background: var(--panel);
@@ -262,8 +292,34 @@ button.primary:hover { background: #35497a; }
   background: #0e0e12;
 }
 
-/* Danh sách thư mục cue */
-#folderList { flex: 1; overflow-y: auto; padding: 6px 8px; min-height: 120px; }
+/* ===== Panel trái: TAB «Bài» | «Nhạc» — phương án C: cam thương hiệu HS TIMECODE ===== */
+.cue-tabs {
+  display: flex; align-items: center; gap: 6px; padding: 9px 10px;
+  background: linear-gradient(180deg, #241505, #1a1208);
+  border-bottom: 2px solid rgba(255, 166, 63, .45);
+}
+.ctab {
+  flex: 1; height: 42px; border-radius: 11px; border: 1px solid rgba(255, 166, 63, .25);
+  background: rgba(255, 166, 63, .06); color: #d8b98a;
+  font-size: 14px; font-weight: 700; cursor: pointer; letter-spacing: .2px;
+}
+.ctab.is-active {
+  background: linear-gradient(135deg, #ff9f43, #ff7a1a); border-color: transparent; color: #241505;
+  box-shadow: 0 4px 14px rgba(255, 138, 43, .40);
+}
+.cue-tabs .mini {
+  height: 42px; border-radius: 11px; border: 1px solid rgba(255, 166, 63, .25);
+  background: transparent; color: #d8b98a; font-size: 12px; padding: 0 12px;
+}
+.cpane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.cpane[hidden] { display: none; }
+.icon-btn { padding: 6px 9px; }
+.icon-btn.is-active { background: #2b4a86; border-color: var(--blue); color: #fff; }
+.musictools { display: flex; align-items: center; gap: 7px; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+.mlabel { color: #9a9aa8; font-weight: 700; font-size: 12px; letter-spacing: .5px; }
+.count-chip { background: #2b4a86; border: 1px solid var(--blue); color: #fff; border-radius: 20px; font-size: 10.5px; font-weight: 700; padding: 1px 8px; }
+/* Danh sách bài — nguyên khung nhận màu nhạt khi 🎨 đổi màu */
+#folderList { flex: 1; overflow-y: auto; padding: 6px 8px; min-height: 80px; }
 .folder {
   border: 1px solid #343458;
   border-radius: 8px;
@@ -323,18 +379,29 @@ button.primary:hover { background: #35497a; }
 .cue-row .cx:hover { color: var(--red); }
 .folder-empty { padding: 7px 10px; color: var(--dim); font-size: 11.5px; }
 
-/* Danh sách nhạc */
+/* Danh sách bài hát (tab Nhạc) — ô thả cao, hàng compact có pill định dạng */
 #audioDrop {
-  margin: 8px 10px;
-  padding: 14px 10px;
+  margin: 9px 10px 0;
+  padding: 15px 8px;
   border: 1.5px dashed #3a3a48;
-  border-radius: 8px;
+  border-radius: 10px;
   color: var(--dim);
   font-size: 12px;
   text-align: center;
+  background: rgba(79, 140, 255, .04);
 }
 #audioDrop.drag { border-color: var(--green); color: var(--green); background: rgba(46, 224, 111, .06); }
-#songList { flex: 1.1; overflow-y: auto; padding: 4px 8px 10px; min-height: 100px; }
+#songList { flex: 1; overflow-y: auto; padding: 4px 8px 10px; min-height: 60px; }
+.fmt-pill { display: inline-block; border-radius: 5px; font-size: 9.5px; font-weight: 800; letter-spacing: .5px; padding: 1px 5px; }
+.fmt-mp3 { background: rgba(154, 107, 255, .18); color: #b99aff; }
+.fmt-wav { background: rgba(62, 207, 178, .16); color: #6fe0c8; }
+.fmt-m4a, .fmt-aac { background: rgba(79, 140, 255, .18); color: #9cc0ff; }
+.fmt-aiff, .fmt-aif { background: rgba(255, 166, 63, .16); color: #ffc37a; }
+.fmt-flac { background: rgba(46, 224, 111, .14); color: #7fe8a4; }
+.fmt-ogg { background: rgba(255, 107, 157, .16); color: #ff9dc4; }
+.fmt-other { background: rgba(139, 139, 152, .16); color: #a8a8b6; }
+.smeta { display: flex; align-items: center; gap: 6px; }
+.smeta .sdim { color: var(--dim); font-size: 10.5px; }
 .song-item {
   display: flex; align-items: center; gap: 8px;
   border: 1px solid #2c2c36;
@@ -356,57 +423,88 @@ button.primary:hover { background: #35497a; }
 /* ===== Info strip (HIỆN TẠI / TIẾP THEO / CÒN LẠI) ===== */
 #infoStrip {
   display: flex;
-  gap: 18px;
-  padding: 10px 16px 8px;
-  align-items: flex-start;
-  justify-content: flex-start;
+  gap: 10px;
+  padding: 12px 20px 10px;
+  align-items: center;
   background: #0e0e11;
   border-bottom: 1px solid var(--line);
 }
-.info-cell { display: flex; flex-direction: column; gap: 3px; min-width: 170px; }
+.info-gap { flex: 1; }
+.info-cell { display: flex; flex-direction: column; gap: 3px; min-width: 170px; text-align: center; }
 .info-label { font-size: 10px; font-weight: 700; letter-spacing: 1.5px; color: var(--dim); }
+.next-row { display: flex; align-items: center; justify-content: center; gap: 8px; }
+.info-name { font-size: 19px; font-weight: 800; color: #fff; white-space: nowrap; text-shadow: 0 0 12px rgba(255, 255, 255, .30); }
+.info-name.none { color: #6b6b78; font-size: 13px; font-weight: 600; text-shadow: none; }
 .info-tc {
   font-family: "SF Mono", Menlo, monospace;
   font-size: 26px;
   font-weight: 700;
   letter-spacing: 1px;
   padding: 4px 12px;
-  border-radius: 7px;
+  border-radius: 4px;
   border: 1px solid #2b3a63;
   background: #10131c;
   width: fit-content;
 }
-.info-tc.cur { color: #5f9bff; border-color: #2b3a63; text-shadow: 0 0 12px rgba(95, 155, 255, .3); }
+/* HIỆN TẠI — cam thương hiệu (đồng hồ trùng đã bỏ khỏi topbar) */
+.info-tc.cur { color: #ffa63f; border-color: rgba(255, 166, 63, .45); background: rgba(255, 166, 63, .08); text-shadow: 0 0 12px rgba(255, 166, 63, .30); }
+/* NEXT — xanh lá đếm ngược; hết cue thì mờ */
 .info-tc.next { color: #35e0c0; border-color: #1e4a42; text-shadow: 0 0 12px rgba(53, 224, 192, .25); }
-.info-tc.rem { color: #57e389; border-color: #1e5a34; text-shadow: 0 0 12px rgba(87, 227, 137, .25); }
-.info-next { display: flex; align-items: center; gap: 10px; }
-.info-name { color: var(--dim); font-size: 12px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.info-tc.next.next-none { color: #6b6b78; border-color: #2c2c36; background: rgba(255, 255, 255, .03); text-shadow: none; }
+/* CÒN LẠI — xanh dương */
+.info-tc.rem { color: #6fa2ff; border-color: rgba(79, 140, 255, .45); background: rgba(79, 140, 255, .10); text-shadow: 0 0 12px rgba(95, 155, 255, .30); }
 
-/* ===== Panel thuộc tính cue ===== */
+/* Cụm nút ghi (kiểu 404) — hàng dưới cùng của dải đồng hồ, chạy ngang toàn bộ chiều rộng */
+#infoStrip { flex-wrap: wrap; }
+.rec-chips {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap; justify-content: flex-start;
+  flex-basis: 100%; margin-left: 0; max-width: none;
+  padding-top: 8px; border-top: 1px solid #22222a;
+}
+.rchip {
+  position: relative;
+  display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px;
+  background: #1c1c22; border: 1px solid #2f2f38; border-radius: 6px;
+  color: #cfcfda; font-size: 10.5px; font-weight: 700; letter-spacing: .3px;
+  white-space: nowrap; cursor: pointer;
+}
+.rchip:hover { border-color: #4a4a56; background: #22222a; }
+.rchip.on { background: #5a4515; border-color: #ffb36b; color: #ffe2b0; box-shadow: 0 0 10px rgba(255, 179, 107, .22); }
+.rchip.ok { background: rgba(87, 227, 137, .07); border-color: rgba(87, 227, 137, .4); color: #57e389; }
+.rchip.rec { background: rgba(255, 80, 80, .07); border-color: rgba(255, 107, 107, .55); color: #ff9b9b; }
+.rchip.rec.armed { background: #8a2222; border-color: #ff6b6b; color: #fff; box-shadow: 0 0 12px rgba(255, 80, 80, .4); }
+.rchip.rec.armed:hover { border-color: #ff9b9b; }
+
+/* ===== Panel thuộc tính cue (bố cục 3 hàng gọn) ===== */
 #propsPanel {
   border-top: 1px solid var(--line);
   background: #121216;
-  height: 250px; flex-shrink: 0;
+  height: 140px; flex-shrink: 0;
   display: flex; flex-direction: column;
   min-height: 0;
 }
 #propsHead {
   display: flex; align-items: center; gap: 8px;
-  padding: 7px 14px;
+  padding: 5px 14px;
   font-size: 11px; font-weight: 700; letter-spacing: 1px; color: var(--dim);
   cursor: pointer;
   flex-shrink: 0;
 }
-#propsBody { flex: 1; min-height: 0; padding: 4px 14px 12px; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }
-.prow { display: flex; align-items: center; gap: 10px; }
-.prow > label:first-child { color: var(--dim); font-size: 10px; font-weight: 700; letter-spacing: 1px; min-width: 130px; }
+#propsBody { flex: 1; min-height: 0; padding: 2px 14px 10px; display: flex; flex-direction: column; gap: 6px; justify-content: center; overflow-y: auto; }
+.prow { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.pf { display: flex; align-items: center; gap: 5px; min-width: 0; flex: 1; }
+.pf > label { color: var(--dim); font-size: 10px; font-weight: 700; letter-spacing: .8px; white-space: nowrap; }
+.pf.tcf { flex: 1.05; }
+.pf.grow2 { flex: 1.9; }
+.pf.argsf { flex: .7; }
+.pf.colorsf { flex: 2.2; gap: 6px; }
 .prow input:not([type="checkbox"]) {
-  flex: 1;
+  flex: 1; min-width: 0;
   background: #0e0e12;
   border: 1px solid #2a2a34;
   border-radius: 6px;
-  padding: 7px 10px;
-  font-size: 13px;
+  padding: 5px 8px;
+  font-size: 12px;
 }
 .prow input.tc-input {
   font-family: "SF Mono", Menlo, monospace;
@@ -415,12 +513,12 @@ button.primary:hover { background: #35497a; }
   letter-spacing: 1.5px;
   text-align: center;
 }
-.prow input.mono { font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
-.prow.split > div { flex: 1; display: flex; align-items: center; gap: 10px; }
-.modebtns { display: flex; gap: 6px; flex: 1; }
-.modebtn { flex: 1; padding: 7px 4px; }
+.prow input.mono { font-family: "SF Mono", Menlo, monospace; font-size: 11.5px; }
+.modebtns { display: flex; gap: 5px; flex: none; }
+.modebtn { flex: none; padding: 6px 10px; font-size: 11.5px; }
 .modebtn.active { background: #4a4a20; border-color: #d8c34a; color: #ffe98a; }
-#pSwatches { display: flex; gap: 5px; flex-wrap: wrap; flex: 1; }
+#pSwatches { display: flex; gap: 4px; flex-wrap: wrap; flex: 1; align-items: center; }
+#pSwatches .swatch { width: 16px; height: 16px; border-radius: 4px; }
 .swatch {
   width: 22px; height: 22px;
   border-radius: 5px;
@@ -435,18 +533,19 @@ button.playnow {
   border: 1px solid var(--blue);
   color: #cfe0ff;
   font-weight: 700;
-  padding: 9px;
-  border-radius: 7px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  flex: none;
 }
 button.playnow:hover { background: #35497a; }
 
-/* Nút ẨN CLIP — to, đổi màu vàng hổ phách khi đang ẩn */
+/* Nút ẨN CLIP — đổi màu vàng hổ phách khi đang ẩn */
 button.hidebtn {
-  flex: 1;
+  flex: none;
   font-weight: 800;
   letter-spacing: .5px;
-  padding: 10px 8px;
-  border-radius: 7px;
+  padding: 6px 12px;
+  border-radius: 6px;
   background: #23232b;
   border: 1px solid #3a3a44;
   color: #cfcfda;
@@ -459,6 +558,15 @@ button.hidebtn.active {
   box-shadow: 0 0 10px rgba(255, 179, 107, .25);
 }
 button.hidebtn:disabled { opacity: .45; }
+
+/* Modal ghi chú cue */
+.modal-box.notebox { width: 420px; }
+.notebody { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+.notebody input {
+  background: #0e0e12; border: 1px solid #2a2a34; border-radius: 6px;
+  padding: 7px 10px; font-size: 13px; color: #e8e8f0;
+}
+.noterow { display: flex; align-items: center; gap: 8px; }
 
 /* ===== Timeline header + MIDI REC bar ===== */
 #tlHeader {
@@ -478,28 +586,6 @@ button.hidebtn:disabled { opacity: .45; }
   border-color: #4f8cff; box-shadow: 0 0 0 1px rgba(79, 140, 255, .35) inset;
 }
 
-#midiRecBar {
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 14px;
-  background: #17120e;
-  border-top: 1px solid #3a2c1a;
-  border-bottom: 1px solid var(--line);
-  overflow-x: auto;
-}
-.mr-label { font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #ffb36b; white-space: nowrap; }
-#midiRecBar button { padding: 5px 10px; font-size: 12px; white-space: nowrap; }
-.mr-lane { display: flex; align-items: center; gap: 5px; color: var(--dim); font-size: 10px; font-weight: 700; white-space: nowrap; }
-.mr-lane select { padding: 4px 6px; }
-.mr-tpl {
-  width: 170px; padding: 4px 8px;
-  font-family: "SF Mono", Menlo, monospace; font-size: 11px;
-  background: #120d09; color: #9fc3ff;
-  border: 1px solid #3a2c1a; border-radius: 6px;
-  white-space: nowrap;
-}
-.mr-tpl:focus { outline: none; border-color: #ffb36b; }
-.mr-check { display: flex; align-items: center; gap: 4px; color: var(--dim); font-size: 10px; font-weight: 700; white-space: nowrap; cursor: pointer; }
-.mr-check input { accent-color: #ffb36b; }
 .rx-badge {
   font-family: "SF Mono", Menlo, monospace;
   font-size: 11px; font-weight: 700;
@@ -511,13 +597,15 @@ button.hidebtn:disabled { opacity: .45; }
   white-space: nowrap;
 }
 .rx-badge.flash { background: rgba(87, 227, 137, .35); }
-.mr-last {
-  flex: 1; min-width: 120px;
-  font-family: "SF Mono", Menlo, monospace;
-  font-size: 11px;
-  color: #9fc3ff;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+
+/* Ô mẫu OSC của MIDI REC (trong panel KẾT NỐI OSC) */
+#mrTpl {
+  width: 100%; box-sizing: border-box; padding: 5px 8px;
+  font-family: "SF Mono", Menlo, monospace; font-size: 11px;
+  background: #120d09; color: #9fc3ff;
+  border: 1px solid #3a2c1a; border-radius: 6px;
 }
+#mrTpl:focus { outline: none; border-color: #ffb36b; }
 
 /* nút + trên monitor */
 .mon-row { display: flex; align-items: center; gap: 5px; }
@@ -531,16 +619,6 @@ button.hidebtn:disabled { opacity: .45; }
 /* ===== Timeline ===== */
 #timelineWrap { flex: 1; min-height: 0; padding: 8px; }
 #timeline { width: 100%; height: 100%; display: block; background: #101013; border: 1px solid var(--line); border-radius: 8px; cursor: crosshair; }
-
-#musicBar {
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 12px;
-  background: #121216;
-  border-top: 1px solid var(--line);
-}
-#audioName { color: var(--dim); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#vol { width: 90px; }
-.zoom button { padding: 2px 9px; }
 
 /* ===== Monitor ===== */
 #monitor {

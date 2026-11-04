@@ -63,24 +63,17 @@
       </label>
     </div>
 
-    <div id="tcDisplay"><span id="tcText">00:00:00:00</span><span id="recDot" class="dot"></span></div>
-
-    <div class="transport">
-      <button id="btnHome" title="Về đầu (Home)">⏮</button>
-      <button id="btnPlay" title="Phát / Tạm dừng (Space)">▶</button>
-      <button id="btnStop" title="Dừng (S)">■</button>
-      <button id="btnLoop" title="Lặp (L)">⟲</button>
-      <select id="speedSel" title="Tốc độ">
-        <option value="0.5">0.5×</option>
-        <option value="0.75">0.75×</option>
-        <option value="1" selected>1×</option>
-        <option value="1.25">1.25×</option>
-        <option value="1.5">1.5×</option>
-        <option value="2">2×</option>
-      </select>
-      <button id="btnRec" class="rec" title="Bật/tắt ghi (R) — bật REC là tự phát + ghi">● REC</button>
-      <button id="btnMini" title="Mở cửa sổ SMALL (mini) — điều khiển từ xa, chung engine với cửa sổ này">⧉ SMALL</button>
-    </div>
+    <span class="topbar-push"></span>
+    <span class="sldcol" title="Độ rộng hiển thị timeline">
+      <span class="sld"><span class="sld-ic">⇔</span><input type="range" id="ppsRange" min="0" max="100" value="70"><span class="sldval" id="ppsVal">70%</span></span>
+      <span class="sld" title="Độ cao lane"><span class="sld-ic">⇕</span><input type="range" id="rowHRange" min="24" max="96" value="46"><span class="sldval" id="rowHVal">46px</span></span>
+    </span>
+    <span class="sldcol volcol" title="Âm lượng phát ra (tổng — nhân với volume riêng từng clip)">
+      <span class="sld"><span class="sld-ic vol">🔊</span><input type="range" id="vol" min="0" max="1" step="0.01" value="0.9"><span class="sldval" id="volVal">90%</span></span>
+    </span>
+    <span class="sld-sep"></span>
+    <button id="btnMini" title="Mở cửa sổ SMALL (mini) — điều khiển từ xa, chung engine với cửa sổ này">⧉ SMALL</button>
+    <button id="btnGear" class="gear" title="Ẩn/hiện panel KẾT NỐI OSC (cài đặt)">⚙</button>
   </header>
 
   <div id="tlCtx" hidden>
@@ -97,40 +90,55 @@
 
   <main>
     <aside id="cuePanel">
-      <div class="panel-head">
-        <span>DANH SÁCH CUE</span>
+      <div class="transport-row">
+        <button id="btnHome" title="Về đầu (Home)">⏮</button>
+        <button id="btnPlay" title="Phát / Tạm dừng (Space)">▶</button>
+        <button id="btnStop" title="Dừng (S)">■</button>
+        <button id="btnLoop" title="Lặp (L)">⟲</button>
+        <select id="speedSel" title="Tốc độ">
+          <option value="0.5">0.5×</option>
+          <option value="0.75">0.75×</option>
+          <option value="1" selected>1×</option>
+          <option value="1.25">1.25×</option>
+          <option value="1.5">1.5×</option>
+          <option value="2">2×</option>
+        </select>
+      </div>
+      <div id="cueTabs" class="cue-tabs">
+        <button id="tabCue" class="ctab is-active" type="button">Bài</button>
+        <button id="tabMusic" class="ctab" type="button">Nhạc</button>
         <span class="spacer"></span>
         <button id="btnSaveProj" class="mini" title="Lưu dự án (⌘S)">Lưu</button>
         <button id="btnOpenProj" class="mini" title="Mở dự án (⌘O)">Mở</button>
       </div>
-      <div class="toolbar">
-        <button id="btnAddCue" class="primary" title="Thêm cue rỗng tại vị trí thanh đò, vào thư mục đang chọn">＋ Cue</button>
-        <button id="btnAddFolder" title="Thêm bài timecode mới — timeline trống, riêng biệt với bài trước">＋ Bài</button>
-        <span class="spacer"></span>
-        <button id="btnDelCue" class="danger" title="Xóa cue đang chọn (Delete)">Xóa</button>
-      </div>
-      <div class="toolbar">
-        <button id="btnCopy" title="Sao chép cue đang chọn">Sao chép</button>
-        <button id="btnCut" title="Cắt cue đang chọn">Cắt</button>
-        <button id="btnPaste" title="Dán cue vào thanh đò">Dán</button>
-        <button id="btnCueUp" title="Lùi cue 1 frame">↑</button>
-        <button id="btnCueDown" title="Tăng cue 1 frame">↓</button>
-      </div>
-      <input id="cueSearch" class="search" placeholder="🔍 Tìm cue — tên hoặc số…">
-      <label class="inline small showall"><input type="checkbox" id="showAllChk"> Hiện cue của MỌI thư mục trên timeline</label>
-      <div id="folderList"></div>
 
-      <div class="panel-head">
-        <span>NHÁC</span>
-        <span class="spacer"></span>
-        <button id="btnSortSongs" class="mini" title="Sắp xếp A→Z">A→Z</button>
-        <button id="btnAddSong" class="mini primary" title="Thêm bài hát">＋ Thêm nhạc</button>
+      <div id="paneCue" class="cpane is-active">
+        <div class="toolbar">
+          <button id="btnAddCue" class="primary" title="Thêm cue rỗng tại vị trí thanh đò, vào thư mục đang chọn">＋ Cue</button>
+          <button id="btnAddFolder" title="Thêm bài timecode mới — timeline trống, riêng biệt với bài trước">＋ Bài</button>
+          <button id="btnCueSearch" class="icon-btn" title="Tìm cue — bấm để mở/đóng ô tìm">🔍</button>
+          <span class="spacer"></span>
+          <button id="btnDelCue" class="danger" title="Xóa cue đang chọn (Delete)">Xóa</button>
+        </div>
+        <input id="cueSearch" class="search" placeholder="🔍 Tìm cue — tên hoặc số…" hidden>
+        <div id="folderList"></div>
       </div>
-      <div id="audioDrop" title="Kéo thả file âm thanh từ Finder vào đây">
-        Thả file âm thanh vào đây,<br>hoặc nhấn <b>＋ Thêm nhạc</b>
+
+      <div id="paneMusic" class="cpane" hidden>
+        <div class="musictools">
+          <span class="mlabel">BÀI HÁT</span>
+          <span id="songCount" class="count-chip">0</span>
+          <span class="spacer"></span>
+          <button id="btnSongSearch" class="icon-btn" title="Tìm bài hát — bấm để mở/đóng ô tìm">🔍</button>
+          <button id="btnSortSongs" title="Sắp xếp A→Z">A→Z</button>
+          <button id="btnAddSong" class="primary" title="Thêm bài hát">＋ Thêm</button>
+        </div>
+        <input id="songSearch" class="search" placeholder="🔍 Tìm bài hát — tên hoặc số…" hidden>
+        <div id="audioDrop" title="Kéo thả file âm thanh từ Finder vào đây">
+          Thả file âm thanh vào đây,<br>hoặc nhấn <b>＋ Thêm</b>
+        </div>
+        <div id="songList"></div>
       </div>
-      <input id="songSearch" class="search" placeholder="🔍 Tìm nhạc — tên hoặc số…">
-      <div id="songList"></div>
     </aside>
 
     <div id="splitL" class="vsplit" title="Kéo để đổi độ rộng panel"></div>
@@ -141,23 +149,39 @@
           <div class="info-label">HIỆN TẠI</div>
           <div class="info-tc cur" id="infoCur">00:00:00:00</div>
         </div>
+        <span class="info-gap"></span>
         <div class="info-cell">
-          <div class="info-label">CUE TIẾP THEO</div>
-          <div class="info-next">
+          <div class="info-label">NEXT</div>
+          <div class="next-row">
             <div class="info-tc next" id="infoNext">--:--:--:--</div>
-            <div id="infoNextName" class="info-name">không còn cue nào</div>
+            <div id="infoNextName" class="info-name">không còn cue</div>
           </div>
         </div>
+        <span class="info-gap"></span>
         <div class="info-cell">
           <div class="info-label">CÒN LẠI</div>
           <div class="info-tc rem" id="infoRem">00:00:00:00</div>
         </div>
+        <div class="rec-chips" role="group" aria-label="Cụm nút ghi">
+          <button id="chipRec" class="rchip rec" title="Bật / tắt ghi. Đang bật + Play đang chạy = mỗi lần bấm được ghi đúng khung hình. Tắt ghi = cả phiên ghi là MỘT bước hoàn tác (⌘Z).">● REC</button>
+          <button id="chipPad" class="rchip" title="Kiểu cue khi ghi pad MIDI. Tự động: bấm nhả nhanh → Trigger, giữ ≥ 0,5 s → Piano (giữ = chạy, nhả = dừng). Pad đã có cue rồi thì theo kiểu của cue đó. Núm vặn / fader luôn ghi cue Float.">▦ Tự động</button>
+          <button id="chipMidi" class="rchip" title="Trạng thái bàn MIDI — cắm vào là app tự nhận. Bấm để nhảy tới mục chọn thiết bị trong panel KẾT NỐI OSC.">♪ MIDI</button>
+          <button id="chipResolume" class="rchip" title="Gửi lệnh test (bật clip Layer 1 Clip 1) và chờ phản hồi — kiểm tra Resolume có gửi OSC về máy này không.">📡 Resolume</button>
+          <button id="chipBounce" class="rchip" title="Bấm MIDI cũng bắn luôn OSC của cue đó — kể cả khi không ghi. Phím có trong map MIDI của Resolume thì Resolume tự làm, app không gửi lại (tránh làm 2 lần).">⚡ Bắn OSC</button>
+          <button id="chipSmpte" class="rchip" title="BẬT: clip ghi lại trong phiên này chạy SMPTE Input (theo thanh đò, đúng từng khung: show đứng thì clip đứng, show chạy thì chạy tiếp). TẮT (mặc định): app chỉ bắn clip lúc đầu — anh tự điều khiển clip trong Resolume. Đổi riêng từng clip: chuột phải clip → SMPTE Input.">⏱ SMPTE</button>
+          <button id="chipRecMode" class="rchip" title="REC lại đoạn đã ghi. Ghi đè: phím nào bấm lại thì clip cũ của phím đó từ chỗ bấm trở đi được thay bằng lần bấm mới. Ghi thêm: giữ cả clip cũ lẫn mới. Đồng bộ với radio Chế độ ở panel GHI / BỘ LỌC.">Ghi thêm</button>
+          <button id="chipDedupe" class="rchip" title="Xóa cue trùng trong thư mục đang chọn: cùng một cue 2 lần ở một khung hình; câu trả lời trễ của Resolume thành clip thứ 2; các clip chồng cùng 1 lane ở cùng 1 chỗ.">🧹 Dọn trùng</button>
+        </div>
       </div>
       <div id="tlHeader">
-        <span class="tl-title">TIMELINE — <span id="tlSongName">Chính</span></span>
         <span class="tl-tools">
           <button id="toolSelect" class="tlt on" title="Chọn — thao tác thường (phím T)">➤ Chọn</button>
-          <button id="toolCut" class="tlt" title="Cắt/Split (CapCut): click vào clip audio/cue để CHIA 2 đoạn cùng source — kéo mép ở chế độ Chọn sẽ khôi phục phần đã cắt (phím C)">✂ Cắt</button>
+          <button id="toolCut" class="tlt icon cut-split" title="Cắt/Split (phím C): click vào clip audio/cue để CHIA 2 đoạn cùng source — kéo mép ở chế độ Chọn sẽ khôi phục phần đã cắt">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg>
+          </button>
+          <button id="btnQuickCut" class="tlt icon cut-quick" title="Cắt nhanh (phím X): rê chuột vào cue/clip thấy dòng đỏ, CLICK là giữ phần TRƯỚC bỏ phần SAU. Bấm lại để thoát">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg>
+          </button>
         </span>
         <button id="btnLaneV" title="Thêm lane V (video cue — kéo cue vào)">＋ V</button>
         <button id="btnLaneA" title="Thêm lane A (audio — kéo bài hát vào đây)">＋ A</button>
@@ -172,56 +196,11 @@
           <button id="btnSelDel" class="danger" title="Xóa (Del)">Xóa</button>
           <button id="btnSelNone" title="Bỏ chọn">Bỏ chọn</button>
         </span>
-        <label class="inline small zoomer" title="Độ rộng hiển thị — kéo để thu/phóng toàn bộ layer ngang">
-          ⇔ RỘNG <input type="range" id="ppsRange" min="0" max="100" value="50">
-        </label>
-        <label class="inline small zoomer" title="Độ cao lane — kéo để cao/thấp toàn bộ layer dọc">
-          ⇕ CAO <input type="range" id="rowHRange" min="24" max="96" value="60">
-        </label>
         <span class="spacer"></span>
         <span id="tlStats" class="hint">0 cue · 0 lane</span>
       </div>
       <div id="timelineWrap">
         <canvas id="timeline"></canvas>
-      </div>
-      <div id="midiRecBar">
-        <span class="mr-label">▼ MIDI REC</span>
-        <button id="mrRec" class="rec">● REC TẮT</button>
-        <label class="mr-lane">NGUỒN
-          <select id="mrSource" title="Nguồn ghi: đàn MIDI (Web MIDI) hoặc OSC gửi tới từ Resolume">
-            <option value="midi">MIDI</option>
-            <option value="osc">Resolume (OSC)</option>
-          </select>
-        </label>
-        <label class="mr-lane" id="mrMidiBox" title="Thiết bị MIDI vào (đàn/pad controller)">MIDI IN
-          <select id="mrMidiDevice"><option value="">— quét thiết bị —</option></select>
-        </label>
-        <button id="mrMidiScan" title="Quét lại thiết bị MIDI">⟳ MIDI</button>
-        <label class="mr-lane" id="mrPadBox" title="Cách gán địa chỉ OSC cho từng pad/note">PAD
-          <select id="mrPadMode">
-            <option value="auto">Tự động (mẫu OSC)</option>
-            <option value="learn">Học từ OSC vào</option>
-          </select>
-        </label>
-        <input id="mrTpl" class="mr-tpl" value="/midi/note/{n}" title="Mẫu địa chỉ OSC cho pad — {n} = số note (0-127), {c} = kênh MIDI (1-16). VD: /composition/layers/{n}/clips/1/connect">
-        <label class="mr-check" title="Bấm pad (kể cả khi không ghi) là bắn OSC ngay theo địa chỉ của pad đó">
-          <input type="checkbox" id="mrBounce" checked> Bấm pad bắn OSC
-        </label>
-        <label class="mr-lane">GHI
-          <select id="mrRecMode" title="Ghi thêm: giữ cue cũ · Ghi đè: xóa cue cũ trong lane ghi từ điểm phát">
-            <option value="overdub">Ghi thêm</option>
-            <option value="overwrite">Ghi đè</option>
-          </select>
-        </label>
-        <label class="mr-lane">LANE GHI
-          <select id="mrLane"></select>
-        </label>
-        <button id="mrResolume" title="Kiểm tra Resolume gửi OSC">Resolume</button>
-        <span id="mrRx" class="rx-badge" title="Số OSC nhận được">RX 0</span>
-        <span id="mrLast" class="mr-last" title="OSC mới nhất nhận được">—</span>
-        <button id="mrToCue" title="Tạo cue từ OSC mới nhất, tại thanh đò, vào thư mục đang chọn">OSC → Cue</button>
-        <button id="mrDedupe" title="Xóa cue trùng (cùng địa chỉ + cùng thời điểm, trong thư mục đang chọn)">Dọn trùng</button>
-        <button id="mrMonitor" title="Mở bảng MONITOR xem toàn bộ OSC nhận được">Monitor ⇗</button>
       </div>
       <div id="hsplitProps" class="hsplit" title="Kéo để đổi độ cao bảng thuộc tính"></div>
       <div id="propsPanel">
@@ -232,33 +211,14 @@
         </div>
         <div id="propsBody" style="display:none">
           <div class="prow">
-            <label>TÊN</label>
-            <input id="pName" placeholder="tên cue (hiện trong danh sách)">
-          </div>
-          <div class="prow split">
-            <div>
-              <label>THỜI ĐIỂM KÍCH HOẠT</label>
-              <input id="pTime" class="tc-input">
-            </div>
-            <div>
-              <label>ĐỘ DÀI</label>
-              <input id="pDur" class="tc-input" placeholder="00:00:00:00 = tự động">
-            </div>
+            <div class="pf"><label>TÊN</label><input id="pName" placeholder="tên cue (hiện trong danh sách)"></div>
+            <div class="pf tcf"><label>KÍCH HOẠT</label><input id="pTime" class="tc-input"></div>
+            <div class="pf tcf"><label>ĐỘ DÀI</label><input id="pDur" class="tc-input" placeholder="= tự động"></div>
+            <button id="pPlayNow" class="playnow">▶ Phát ngay</button>
           </div>
           <div class="prow">
-            <label>ĐỊA CHỈ OSC</label>
-            <input id="pAddr" class="mono" placeholder="/composition/layers/1/clips/1/connect">
-          </div>
-          <div class="prow">
-            <label>THAM SỐ</label>
-            <input id="pArgs" class="mono" placeholder="1 · cách nhau bởi dấu phẩy">
-          </div>
-          <div class="prow">
-            <label>GHI CHÚ</label>
-            <input id="pNote" placeholder="ghi chú cho cue này">
-          </div>
-          <div class="prow">
-            <label>CHẾ ĐỘ</label>
+            <div class="pf grow2"><label>OSC</label><input id="pAddr" class="mono" placeholder="/composition/layers/1/clips/1/connect"></div>
+            <div class="pf argsf"><label>THAM SỐ</label><input id="pArgs" class="mono" placeholder="1, 2"></div>
             <div class="modebtns">
               <button id="pModeTrigger" class="modebtn">● Trigger</button>
               <button id="pModePiano" class="modebtn">🎹 Piano</button>
@@ -266,37 +226,14 @@
             </div>
           </div>
           <div class="prow">
-            <label>MÀU</label>
-            <div id="pSwatches"></div>
+            <div class="pf colorsf"><label>MÀU</label><div id="pSwatches"></div></div>
+            <button id="pHideBtn" class="hidebtn" title="Làm mờ cue trên timeline (thêm sọc chéo) và KHÔNG gửi OSC khi phát">⊘ ẨN CLIP</button>
           </div>
-          <div class="prow">
-            <label></label>
-            <button id="pHideBtn" class="hidebtn" title="Làm mờ cue trên timeline (thêm sọc chéo) và KHÔNG gửi OSC khi phát">⊘ ẨN CLIP — KHÔNG GỬI QUA OSC</button>
-            <span class="spacer"></span>
-            <button id="pDelete" class="danger">Xóa cue</button>
-          </div>
-          <button id="pPlayNow" class="playnow">▶ Phát ngay</button>
         </div>
-      </div>
-      <div id="musicBar">
-        <span id="audioName">chưa chọn nhạc — kéo bài từ danh sách NHÁC vào timeline</span>
-        <span class="spacer"></span>
-        <label class="inline">🔊<input type="range" id="vol" min="0" max="1" step="0.01" value="0.9"></label>
-        <label class="inline" title="Hành vi khi phát hết nội dung: chạy vô hạn (chỉ dừng khi bấm ⏹) hay tự dừng ở cuối nội dung + 10 giây">Hết phát
-          <select id="playEndSel">
-            <option value="infinite">chạy vô hạn</option>
-            <option value="contentEndPlus10">cuối nội dung +10s</option>
-          </select>
-        </label>
-        <label class="inline" title="Khi hết bài, tự chuyển sang bài kế tiếp trong danh sách"><input type="checkbox" id="autoAdvChk" checked> Tự chuyển bài</label>
-        <label class="inline"><input type="checkbox" id="followChk" checked> Theo thanh đò</label>
-        <span class="zoom">
-          <button id="btnZoomOut">−</button><button id="btnZoomIn">+</button>
-        </span>
       </div>
     </section>
 
-    <aside id="oscPanel">
+    <aside id="oscPanel" hidden>
       <div class="panel-head">KẾT NỐI OSC</div>
       <div class="panel-sec">
         <div class="row">
@@ -349,6 +286,34 @@
         <div class="hint">Bật <b>● REC</b> là đồng hồ tự chạy và mọi OSC khớp bộ lọc được ghi thành cue vào thư mục đang chọn.</div>
       </div>
 
+      <div class="panel-head">MIDI REC — ĐÀN PAD</div>
+      <div class="panel-sec">
+        <div class="row">
+          <label>Nguồn</label>
+          <select id="mrSource" title="Nguồn ghi: đàn MIDI (Web MIDI) hoặc OSC gửi tới từ Resolume" style="flex:1">
+            <option value="midi">MIDI (đàn/pad)</option>
+            <option value="osc">Resolume (OSC)</option>
+          </select>
+        </div>
+        <label class="row" id="mrMidiBox" title="Thiết bị MIDI vào (đàn/pad controller)">
+          <label>MIDI IN</label>
+          <select id="mrMidiDevice" style="flex:1"><option value="">— quét thiết bị —</option></select>
+          <button id="mrMidiScan" title="Quét lại thiết bị MIDI">⟳</button>
+        </label>
+        <label class="row" id="mrPadBox" title="Cách gán địa chỉ OSC cho từng pad/note">
+          <label>PAD</label>
+          <select id="mrPadMode" style="flex:1">
+            <option value="auto">Tự động (mẫu OSC)</option>
+            <option value="learn">Học từ OSC vào</option>
+          </select>
+        </label>
+        <input id="mrTpl" value="/midi/note/{n}" title="Mẫu địa chỉ OSC cho pad — {n} = số note (0-127), {c} = kênh MIDI (1-16). VD: /composition/layers/{n}/clips/1/connect">
+        <label class="hint" style="display:flex;align-items:center;gap:6px" title="Bấm pad (kể cả khi không ghi) là bắn OSC ngay theo địa chỉ của pad đó">
+          <input type="checkbox" id="mrBounce" checked> Bấm pad bắn OSC ngay
+        </label>
+        <div class="hint">REC BẬT (nút ● REC trên cùng) + đang phát → gõ pad là cue tự ghi vào LANE GHI ở trên. Note-off kéo dài cue (Piano).</div>
+      </div>
+
       <div class="panel-head">GỬI THỬ</div>
       <div class="panel-sec">
         <input id="testAddr" value="/composition/layers/1/clips/1/connect">
@@ -373,6 +338,7 @@
       <div class="panel-head">
         OSC ĐÃ NHẬN — TẠO CUE
         <span class="spacer"></span>
+        <button id="mrDedupe" class="mini" title="Xóa cue trùng (cùng địa chỉ + cùng thời điểm, trong thư mục đang chọn)">Dọn trùng</button>
         <button id="btnOscToCues" class="mini primary" title="Tạo cue từ mọi OSC chưa lưu, tại thanh đò">Tất cả → Cue</button>
       </div>
       <div id="oscSeenList" style="padding:6px 8px;font-size:11px;color:#85858f;"></div>
@@ -420,6 +386,25 @@
         <span>THỜI GIAN</span><span>ĐỊA CHỈ OSC</span><span>LOẠI</span><span>ĐỐI SỐ</span>
       </div>
       <div id="toRows"></div>
+    </div>
+  </div>
+
+  <!-- Modal ghi chú cue -->
+  <div id="noteModal" class="modal" style="display:none">
+    <div class="modal-box notebox">
+      <div class="modal-head">
+        <span>✏ GHI CHÚ CUE</span>
+        <span class="spacer"></span>
+        <button id="noteClose" class="mini" title="Đóng">✕</button>
+      </div>
+      <div class="notebody">
+        <input id="noteInput" placeholder="ghi chú cho cue này…">
+        <div class="noterow">
+          <span class="hint" id="noteTarget"></span>
+          <span class="spacer"></span>
+          <button id="noteSave" class="primary">Lưu</button>
+        </div>
+      </div>
     </div>
   </div>
 
