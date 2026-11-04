@@ -8,6 +8,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   frame: 0,
   fps: 30,
+  speed: 1,
   playing: false,
   contentEnd: 0,
   next: null,             // {name, frame} cue kế tiếp (broadcast từ engine)
@@ -29,10 +30,16 @@ function tcString(frame, fps) {
 }
 
 /* ---------- nhận trạng thái từ engine chính ---------- */
+/* Đồng hồ hiển thị: engine gửi mốc (frame + thời điểm nhận), Small chỉ NỘI SUY giữa 2 mốc
+   để số chạy mượt 60fps — KHÔNG tự quyết định thời gian, chỉ hiển thị. */
+const disp = { baseFrame: 0, baseMs: 0, fps: 30, playing: false, speed: 1 };
+let lastRenderMs = 0;
+
 if (window.hs.onUiState) window.hs.onUiState((st) => {
   if (!st) return;
   state.frame = st.frame || 0;
   state.fps = st.fps || 30;
+  state.speed = st.speed || 1;
   state.playing = !!st.playing;
   state.contentEnd = st.contentEnd || 0;
   state.next = st.next || null;
@@ -40,6 +47,12 @@ if (window.hs.onUiState) window.hs.onUiState((st) => {
   state.curFolderId = st.curFolderId || null;
   if (st.osc) { state.oscListening = st.osc.listening; state.oscPort = st.osc.port; }
   if (st.stats) { state.rx = st.stats.rx; state.tx = st.stats.tx; }
+  // neo lại mốc nội suy theo engine
+  disp.baseFrame = state.frame;
+  disp.baseMs = performance.now();
+  disp.fps = state.fps;
+  disp.playing = state.playing;
+  disp.speed = state.speed;
   render();
 });
 if (window.hs.onMiniSettings) window.hs.onMiniSettings((s) => {
@@ -56,8 +69,14 @@ if (window.hs.onStats) window.hs.onStats((s) => {
 });
 
 /* ---------- render ---------- */
+function displayFrame(nowMs) {
+  if (!disp.playing) return disp.baseFrame;
+  return disp.baseFrame + ((nowMs - disp.baseMs) / 1000) * disp.fps * disp.speed;
+}
+
 function render() {
-  $('miniTcText').textContent = tcString(state.frame, state.fps);
+  const f = state.playing ? displayFrame(performance.now()) : state.frame;
+  $('miniTcText').textContent = tcString(f, state.fps);
   // trạng thái ở hàng trên: TẠM DỪNG / ĐANG PHÁT
   const st = $('miniStatus');
   if (state.playing) { st.textContent = 'ĐANG PHÁT'; st.className = 'stv play'; }
@@ -68,7 +87,7 @@ function render() {
   // NEXT — cue kế tiếp của bài đang chạy: "Next: tên cue · cue n/total" + timecode đếm ngược
   const nName = $('miniNextName'), nLabel = $('miniNextLabel'), nIdx = $('miniNextIdx'), nTc = $('miniNextTc');
   if (state.next && state.next.frame > state.frame) {
-    nTc.textContent = tcString(state.next.frame - state.frame, state.fps);
+    nTc.textContent = tcString(state.next.frame - f, state.fps);
     nLabel.textContent = state.next.name || 'cue';
     nIdx.textContent = state.next.idx ? `cue ${state.next.idx}/${state.next.total || '?'}` : '';
     nTc.classList.remove('next-none');
@@ -83,14 +102,28 @@ function render() {
 
   // CÒN LẠI — đến điểm ngoài cùng của timeline
   $('miniRem').textContent = state.contentEnd > 0
-    ? tcString(Math.max(0, state.contentEnd - state.frame), state.fps)
+    ? tcString(Math.max(0, state.contentEnd - f), state.fps)
     : '00:00:00:00';
 
   // thanh vị trí: playhead / cuối nội dung — CHỈ SỐ, không phải timeline
-  const pct = state.contentEnd > 0 ? Math.min(100, (state.frame / state.contentEnd) * 100) : 0;
+  const pct = state.contentEnd > 0 ? Math.min(100, (f / state.contentEnd) * 100) : 0;
   $('miniBarFill').style.width = pct.toFixed(2) + '%';
   renderProjects();
 }
+
+/* vòng cập nhật hiển thị riêng của Small — luôn chạy (backgroundThrottling:false),
+   nội suy giữa các broadcast để số thời gian không giật; KHÔNG phải nguồn thời gian. */
+function miniTick() {
+  if (state.playing) {
+    const now = performance.now();
+    if (now - lastRenderMs >= 33) {   // ~30fps cho phần chữ/thanh — đủ mượt, nhẹ CPU
+      lastRenderMs = now;
+      render();
+    }
+  }
+  requestAnimationFrame(miniTick);
+}
+requestAnimationFrame(miniTick);
 
 function renderPin() {
   const pin = $('miniPin');

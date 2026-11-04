@@ -78,6 +78,8 @@
   </header>
 
   <div id="tlCtx" hidden>
+    <div id="tlCtxHead" class="ctx-head" hidden></div>
+    <button data-c="newcue" class="ctx-new" hidden>＋ <span>Thêm cue tại đây</span></button>
     <button data-c="note">✏ <span>Sửa ghi chú…</span></button>
     <button data-c="smpte">⏱ <span>SMPTE Input</span></button>
     <button data-c="hide">👁 <span>Ẩn clip (không gửi OSC)</span></button>
@@ -180,6 +182,7 @@
         </div>
       </div>
       <div id="tlHeader">
+        <button id="btnFollow" class="tlt follow" title="Follow — timeline tự cuộn theo thanh đò khi phát (phím F)">Follow</button>
         <span class="tl-tools">
           <button id="toolSelect" class="tlt on" title="Chọn — thao tác thường (phím T)">➤ Chọn</button>
           <button id="toolCut" class="tlt icon cut-split" title="Cắt/Split (phím C): click vào clip audio/cue để CHIA 2 đoạn cùng source — kéo mép ở chế độ Chọn sẽ khôi phục phần đã cắt">

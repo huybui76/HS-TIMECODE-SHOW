@@ -129,6 +129,17 @@ body {
 #tlCtx button.disabled, #tlCtx button.disabled:hover { color: #6f6f7c; cursor: default; background: none; }
 #tlCtx .sep { height: 1px; background: #2c2c36; margin: 5px 8px; }
 #tlCtx button.on span::after { content: "  ✓"; color: #4f8cff; font-weight: 800; }
+/* tiêu đề menu: lane + timecode tại điểm chuột phải */
+.ctx-head {
+  padding: 6px 10px 7px; margin-bottom: 3px;
+  border-bottom: 1px solid #2c2c36;
+  font: 10px "SF Mono", Menlo, monospace; color: #8a8a96;
+}
+.ctx-head b { color: #7dd3fc; }
+/* mục "Thêm cue tại đây" — nổi bật, màu xanh lá */
+#tlCtx button.ctx-new { color: #b6f5cf; background: rgba(46, 224, 111, .08); }
+#tlCtx button.ctx-new:hover { background: rgba(46, 224, 111, .18); color: #fff; }
+#tlCtx button[hidden], #tlCtx .ctx-head[hidden] { display: none; }
 
 /* SelBar — thao tác vùng chọn trên timeline */
 .selbar { display: none; align-items: center; gap: 5px; margin-left: 8px; }
@@ -614,6 +625,11 @@ button.hidebtn:disabled { opacity: .45; }
 .tlt.on {
   background: #2b4079; color: #fff; font-weight: 700;
   border-color: #4f8cff; box-shadow: 0 0 0 1px rgba(79, 140, 255, .35) inset;
+}
+/* Follow — nút bật/tắt riêng, màu xanh lá khi BẬT để tách khỏi nhóm công cụ */
+#btnFollow.on {
+  background: rgba(46, 224, 111, .14); border-color: var(--green); color: var(--green);
+  box-shadow: 0 0 0 1px rgba(46, 224, 111, .35) inset;
 }
 
 .rx-badge {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const dgram = require('dgram');
@@ -125,10 +125,25 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // SHOW REALTIME: không cho Chromium ngắt/throttle renderer khi cửa sổ bị che,
+      // minimize hoặc hide (Cmd+H). Engine playback + timer chạy trong renderer.
+      backgroundThrottling: false
     }
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+}
+
+/* Giữ renderer thức trong lúc show: chặn App Nap / hibernate của macOS cho cả 2 cửa sổ.
+   Chỉ giữ "prevent-app-suspension" (không chặn màn hình sleep — máy vẫn tắt màn hình bình thường). */
+let powerBlockerId = null;
+function keepAwake(on) {
+  if (on && powerBlockerId === null) {
+    try { powerBlockerId = powerSaveBlocker.start('prevent-app-suspension'); } catch (_) {}
+  } else if (!on && powerBlockerId !== null) {
+    try { powerSaveBlocker.stop(powerBlockerId); } catch (_) {}
+    powerBlockerId = null;
+  }
 }
 
 ipcMain.handle('osc-send', (_e, payload) => {
@@ -310,7 +325,9 @@ function createMiniWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Small luôn cập nhật realtime kể cả khi bị che / app chính minimize, hide
+      backgroundThrottling: false
     }
   });
   miniWin.setAlwaysOnTop(miniSettings.alwaysOnTop !== false, 'screen-saver');
@@ -352,6 +369,8 @@ ipcMain.on('mini-cmd', (_e, cmd) => {
 // trạng thái UI broadcast từ cửa sổ chính → Mini
 ipcMain.on('ui-state', (_e, st) => {
   if (miniWin && !miniWin.isDestroyed()) miniWin.webContents.send('ui-state', st);
+  // giữ renderer thức suốt lúc phát show (macOS App Nap có thể treo timer khi ẩn app)
+  keepAwake(!!(st && st.playing));
 });
 
 app.whenReady().then(() => {

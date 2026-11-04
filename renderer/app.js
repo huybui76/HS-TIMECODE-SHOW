@@ -34,7 +34,7 @@ const state = {
   tlTool: 'select',        // 'select' = chọn (➤) | 'cut' = cắt nhanh (✂)
   clipboardAudio: null,    // {songId, srcStart, srcEnd} — SEGMENT clip nhạc đã sao chép (tham chiếu source, không copy file)
   clipboard: null,
-  follow: true,
+  follow: false,           // mặc định TẮT: timeline đứng yên khi phát — cue không trượt theo playhead
   listenPort: 7000,
   target: { host: '127.0.0.1', port: 7001 },
   filterPreset: 'connect',
@@ -1097,6 +1097,8 @@ function totalFrames() { return Math.max(1, Math.round(totalSeconds() * state.fp
 function setFrame(f) {
   // playhead được phép vượt QUÁ điểm cuối timeline (chỉ khoá dưới 0) — không khíng ở 03:00
   state.frame = Math.max(0, f);
+  clockReset(state.frame);          // reset mốc clock: seek/scrub không bao giờ làm audio phát lại
+  audioClipId = null;               // lần vào clip kế tiếp sẽ seek đúng 1 lần
   // đang dừng: xem trước âm thanh bám theo clip dưới thanh đò
   if (!state.playing) {
     const clip = findClipAtFrame(state.frame);   // trước đây dùng biến chưa khai báo → ReferenceError khi ⏹/seek
@@ -1115,6 +1117,8 @@ function play() {
   if ((state.playbackEndMode || 'infinite') === 'contentEndPlus10' && isFinite(pe) && state.frame >= pe) setFrame(0);
   // timeline phát → dừng nghe thử để không phát chồng 2 nguồn
   if (!preview.audio.paused) { preview.audio.pause(); previewSetState(false); }
+  clockReset(state.frame);     // mốc monotonic tính từ vị trí bắt đầu phát
+  audioClipId = null;          // cho phép seek đúng 1 lần khi vào clip
   state.playing = true;
   // nhạc do tick() bật khi playhead đi vào clip — timeline luôn chạy từ vị trí thanh đò
   if (state.recArmed && state.recMode === 'overwrite') {
@@ -1130,6 +1134,8 @@ function play() {
 
 function pause() {
   state.playing = false;
+  clock.valid = false;
+  audioClipId = null;   // lần play sau seek lại đúng chỗ đang đứng
   audio.pause();
   updateTransport();
 }
@@ -1516,7 +1522,10 @@ function drawTimeline() {
     const x1 = frameToX(x.t);
     const x2 = frameToX(eventEndFrame(x));
     if (x2 < GUT || x1 > W) return;
-    const bx = Math.max(x1, GUT), bw = Math.max(3, x2 - x1 - 2);
+    // kẹp CẢ HAI mép theo viewport: bx…bx2 luôn là phần nhìn thấy thật của cue
+    // (trước đây chỉ kẹp bx mà giữ bw gốc → phần đã cuộn qua bị cộng bù, cue trôi/dài ra)
+    const bx = Math.max(x1, GUT), bx2 = Math.min(x2, W);
+    const bw = Math.max(3, bx2 - bx - 2);
     const isSelected = selSet().has(x.ev);
     const isHidden = x.ev.enabled === false;
     ctx.fillStyle = cueColor(x.ev, x.f);
@@ -1751,6 +1760,13 @@ canvas.addEventListener('mousedown', (e) => {
   const r = canvas.getBoundingClientRect();
   const x = e.clientX - r.left, y = e.clientY - r.top;
   mousePos = { x, y };
+  // PAN an toàn: chuột GIỮA — pan ngay cả khi trúng cue/clip (không dời dữ liệu)
+  if (e.button === 1) {
+    dragInfo = { x, y, moved: false, viewStart0: state.viewStart, pan: true };
+    canvas.style.cursor = 'grabbing';
+    e.preventDefault();
+    return;
+  }
   // SCROLLBAR ngang dưới cùng — kéo thumb để scroll, bấm track để nhảy tới
   if (sbThumb && y >= sbThumb.y && y <= sbThumb.y + sbThumb.h && x >= GUT) {
     const thumbW = sbThumb.x2 - sbThumb.x1;
@@ -2005,7 +2021,8 @@ canvas.addEventListener('mousemove', (e) => {
     const px = frameToX(state.frame);
     const hit = hitCueBlock(x, y);
     const clip = audioClipHit(x, y);
-    let cur = 'crosshair';
+    // nền lane = con trỏ THƯỜNG; chỉ đổi khi đúng mép/thân cue/clip hoặc scrollbar
+    let cur = y >= TOP ? 'default' : 'crosshair';
     // CHẾ ĐỘ CẮT (✂): trúng khối cue/clip nhạc = đang có thể cắt → con trỏ dao
     if (state.tlTool === 'cut' && (hit || clip)) cur = 'col-resize';
     // hover scrollbar → con trỏ kéo ngang
@@ -2155,7 +2172,7 @@ canvas.addEventListener('dblclick', (e) => {
    Trúng cue → menu cue (ghi chú/SMPTE/Ẩn/Sao chép/Cắt/Dán/Xóa);
    trúng clip nhạc → menu clip (Sao chép/Cắt/Dán/Xóa); trúng nền KHÔNG hiện gì */
 const tlCtx = $('tlCtx');
-let tlCtxTarget = null;   // {type:'cue', ev} | {type:'audio', clip}
+let tlCtxTarget = null;   // {type:'cue', ev} | {type:'audio', clip} | {type:'empty', lane, frame}
 let tlCtxFrame = 0;       // vị trí chuột phải (giây lưới frame) cho "Dán vào đây"
 
 function closeTlCtx() { tlCtx.hidden = true; tlCtxTarget = null; }
@@ -2164,9 +2181,19 @@ function openTlCtxAt(cx, cy) {
   const t = tlCtxTarget;
   const btn = (c) => tlCtx.querySelector(`[data-c="${c}"]`);
   const isCue = !!(t && t.type === 'cue');
+  const isEmpty = !!(t && t.type === 'empty');
   btn('note').hidden = !isCue;
   btn('smpte').hidden = !isCue;
   btn('hide').hidden = !isCue;
+  // "Thêm cue tại đây" chỉ cho vùng TRỐNG của lane V/R
+  btn('newcue').hidden = !isEmpty;
+  const head = $('tlCtxHead');
+  if (isEmpty) {
+    head.hidden = false;
+    head.innerHTML = `Lane <b>${t.lane}</b> · <b>${tcString(t.frame, state.fps)}</b>`;
+  } else {
+    head.hidden = true;
+  }
   if (isCue) {
     btn('smpte').classList.toggle('on', !!t.ev.smpteInput);
     const hiddenClip = t.ev.enabled === false;
@@ -2205,8 +2232,13 @@ canvas.addEventListener('contextmenu', (e) => {
     renderProps(); updateSelBar(); renderFolders();
     tlCtxTarget = { type: 'audio', clip };
   } else {
-    closeTlCtx();
-    return;
+    // VÙNG TRỐNG trên lane cue (V/R) → menu có "Thêm cue tại đây"
+    const row = hitLaneRow(y);
+    if (!row || row.isAudio || x < GUT) { closeTlCtx(); return; }
+    state.sel = null; state.multiSel = new Set();
+    state.selClipId = null; state.selAudioLaneId = null;
+    updateSelBar(); renderFolders(); renderProps();
+    tlCtxTarget = { type: 'empty', lane: row.lane, frame: Math.max(0, Math.round(xToFrame(x))) };
   }
   tlCtxFrame = Math.max(0, Math.round(xToFrame(x)));
   openTlCtxAt(e.clientX, e.clientY);
@@ -2220,6 +2252,27 @@ tlCtx.querySelectorAll('button').forEach((btn) => {
     closeTlCtx();
     if (!t) return;
     switch (btn.dataset.c) {
+      case 'newcue': {
+        // tạo cue mới ngay tại vị trí chuột phải trên lane trống
+        const f = curFolder();
+        if (!f) { flashStatus('Chưa có bài — tạo bài trước.'); return; }
+        const def = makeDef('', [1]);
+        def.name = 'Cue ' + (f.cues.length + 1);
+        def.color = SWATCHES[(f.cues.length * 5) % SWATCHES.length];
+        f.cues.push(def);
+        const ev = makePlacement(t.frame - f.offset, def.id);
+        ev.lane = t.lane;
+        insertCue(f, ev);
+        state.sel = ev;
+        state.multiSel = new Set([ev]);
+        state.selClipId = null;
+        state.selAudioLaneId = null;
+        refreshAll();
+        renderProps();
+        updateSelBar();
+        flashStatus(`Đã thêm "${def.name}" tại ${tcString(t.frame, state.fps)} trên ${t.lane} — điền ĐỊA CHỈ OSC ở panel THUỘC TÍNH CUE.`);
+        break;
+      }
       case 'note': {
         openNoteModal(t.ev);
         break;
@@ -2389,63 +2442,92 @@ drawTimeline = function () {
 
 // Nút zoom −/+ đã bỏ theo thiết kế mới — zoom qua thanh RỘNG (zoomPps vẫn dùng cho ⌘+/-)
 
-/* ================= Vòng lặp chính ================= */
-let lastT = null;
+/* ================= ENGINE CLOCK — nguồn thời gian playback DUY NHẤT =================
+   • Có clip nhạc dưới playhead  → AUDIO CLOCK (audio.currentTime) là chuẩn.
+   • Không có clip               → MONOTONIC clock (performance.now), KHÔNG cộng dồn từng tick.
+   • Engine chạy bằng setInterval (không phải rAF) nên vẫn chạy khi cửa sổ bị che/minimize/hide.
+   • rAF chỉ còn dùng để VẼ giao diện — không quyết định thời gian playback. */
+const clock = { anchorMs: 0, anchorFrame: 0, valid: false };
+function clockReset(frame) {
+  clock.anchorMs = performance.now();
+  clock.anchorFrame = Math.max(0, frame);
+  clock.valid = true;
+}
+function clockNow(nowMs) {
+  return clock.anchorFrame + ((nowMs - clock.anchorMs) / 1000) * state.fps * state.speed;
+}
+let audioClipId = null;   // clip instance mà <audio> đang phục vụ (để chỉ seek 1 lần)
+
+/* ================= Vòng lặp ENGINE (10ms) ================= */
 let lastInfoFrame = -1;
 let infoDirty = true;   // cần tính lại HIỆN TẠI/CUE TIẾP/CÒN LẠI (sau khi thêm/xóa nhạc, cue…)
-function tick(t) {
-  if (state.playing) {
-    // ÂM THANH THEO CLIP INSTANCE: clip nào nằm dưới playhead (lane A bất kỳ) thì phát, đúng srcStart → srcEnd
-    const clip = findClipAtFrame(state.frame);
-    const local = clip ? (clip.srcStart + (state.frame / state.fps - clip.tlStart)) : 0;
-    if (clip && local < clip.srcEnd - 0.01) {
-      // KHÔNG dùng !audio.ended làm gate: khi bài nguồn đã phát hết file (ended), playhead vẫn
-      // phải phát tiếp các clip khác/seek lại — seek currentTime sẽ tự xóa cờ ended
+function engineStep(nowMs) {
+  if (!state.playing) { clock.valid = false; return; }
+
+  // ÂM THANH THEO CLIP INSTANCE: clip nào nằm dưới playhead (lane A bất kỳ) thì phát
+  const clip = findClipAtFrame(state.frame);
+  const localInClip = clip ? (clip.srcStart + (state.frame / state.fps - clip.tlStart)) : 0;
+  const active = clip && localInClip < clip.srcEnd - 0.01;
+
+  if (active) {
+    if (audioClipId !== clip.id || audioSongId !== clip.song.id) {
+      // VÀO CLIP MỚI → nạp source + seek ĐÚNG MỘT LẦN tại vị trí hiện tại
       if (audioSongId !== clip.song.id) {
         audio.src = fileUrl(clip.song.path);
         audioSongId = clip.song.id;
-        audio.playbackRate = state.speed;
       }
-      if (Math.abs(audio.currentTime - local) > 0.3) {
-        audio.currentTime = clamp(local, 0, Math.max(0, clip.song.duration - 0.02));
-      }
-      if (audio.paused) audio.play().catch(() => {});
-      // ÂM LƯỢNG theo INSTANCE: tổng (🔊) × volume riêng × fade in/out × mute — mỗi instance độc lập
-      const vol = clip.clip.mute ? 0
-        : clamp(masterVol * (typeof clip.clip.volume === 'number' ? clip.clip.volume : 1) * fadeFactor(clip.clip, local), 0, 1);
-      if (Math.abs(audio.volume - vol) > 0.01) audio.volume = vol;
-      // playhead bám theo fireplace thật — tính từ tlStart trừ đi srcStart (tiết kiệm mapping)
-      state.frame = (clip.tlStart - clip.srcStart + audio.currentTime) * state.fps;
+      audio.playbackRate = state.speed;
+      audio.currentTime = clamp(localInClip, 0, Math.max(0, clip.song.duration - 0.02));
+      audioClipId = clip.id;
+      audio.play().catch(() => {});
+      clock.valid = false;              // từ đây audio là clock
     } else {
-      // ngoài clip (hoặc clip đã chạy tới điểm cắt srcEnd): im tiếng ngay, playhead vẫn chạy
-      if (!audio.paused) audio.pause();
-      if (Math.abs(audio.volume - masterVol) > 0.01) audio.volume = masterVol;
-      if (lastT != null) state.frame += ((t - lastT) / 1000) * state.fps * state.speed;
+      // ĐANG TRONG CÙNG CLIP → KHÔNG BAO GIỜ SEEK LÙI; lấy vị trí từ AUDIO
+      if (audio.paused) audio.play().catch(() => {});
+      state.frame = (clip.tlStart - clip.srcStart + audio.currentTime) * state.fps;
     }
-    fireDue();
-    // KẾT THÚC PHÁT theo setting: loop (chạy lại) > 'contentEndPlus10' (chỉ dừng nếu nội dung vượt 3 phút,
-    // điểm dừng = cuối nội dung + 10s) > 'infinite' (chạy vô hạn). 03:00 KHÔNG bao giờ là điểm dừng.
-    if (state.loop && state.frame >= totalFrames()) setFrame(0);
-    else {
-      const stopF = playbackEndFrames();
-      if ((state.playbackEndMode || 'infinite') === 'contentEndPlus10' && isFinite(stopF) && state.frame >= stopF) {
-        state.frame = stopF;
-        pause();
-        setStatus('Đã phát hết — cuối nội dung + 10 giây. Muốn chạy vô hạn: đổi "Hết phát" thành "chạy vô hạn".');
-      }
-    }
-    updateTc();
+    // ÂM LƯỢNG theo INSTANCE: tổng (🔊) × volume riêng × fade in/out × mute
+    const local = clip.srcStart + (state.frame / state.fps - clip.tlStart);
+    const vol = clip.clip.mute ? 0
+      : clamp(masterVol * (typeof clip.clip.volume === 'number' ? clip.clip.volume : 1) * fadeFactor(clip.clip, local), 0, 1);
+    if (Math.abs(audio.volume - vol) > 0.01) audio.volume = vol;
+  } else {
+    // NGOÀI CLIP → MONOTONIC clock: không cộng dồn, không phụ thuộc số lần tick
+    if (!audio.paused) audio.pause();
+    audioClipId = null;
+    if (!clock.valid) clockReset(state.frame);
+    state.frame = clockNow(nowMs);
+    if (Math.abs(audio.volume - masterVol) > 0.01) audio.volume = masterVol;
   }
+
+  fireDue();
+  // KẾT THÚC PHÁT: loop (chạy lại) > 'contentEndPlus10' > 'infinite'
+  if (state.loop && state.frame >= totalFrames()) { setFrame(0); clockReset(0); }
+  else {
+    const stopF = playbackEndFrames();
+    if ((state.playbackEndMode || 'infinite') === 'contentEndPlus10' && isFinite(stopF) && state.frame >= stopF) {
+      state.frame = stopF;
+      pause();
+      setStatus('Đã phát hết — cuối nội dung + 10 giây. Muốn chạy vô hạn: đổi "Hết phát" thành "chạy vô hạn".');
+    }
+  }
+}
+
+/* ================= Vòng lặp UI (rAF) — chỉ VẼ, không quyết định thời gian ================= */
+function tick() {
+  if (state.playing) updateTc();
   if (Math.floor(state.frame) !== lastInfoFrame || infoDirty) {
     lastInfoFrame = Math.floor(state.frame);
     infoDirty = false;
     updateInfoStrip();
   }
   if (state.pps) { const pr = $('ppsRange'); if (pr) pr.value = ppsToSlider(state.pps); }
-  lastT = t;
   drawTimeline();
   requestAnimationFrame(tick);
 }
+
+setInterval(() => engineStep(performance.now()), 10);
+requestAnimationFrame(tick);
 
 /* Dải HIỆN TẠI / CUE TIẾP THEO / CÒN LẠI (của thư mục đang chọn) */
 function updateInfoStrip() {
@@ -2483,7 +2565,6 @@ function updateInfoStrip() {
     ? tcString(Math.max(0, endFrame - state.frame), state.fps)
     : '--:--:--:--';
 }
-requestAnimationFrame(tick);
 
 audio.addEventListener('loadedmetadata', () => {
   const s = curSong();
@@ -2508,10 +2589,18 @@ function updateTc() {
   if (el) el.textContent = tcString(state.frame, state.fps);
 }
 
+function toggleFollow() {
+  state.follow = !state.follow;
+  flashStatus('Follow (theo thanh đò): ' + (state.follow ? 'BẬT' : 'TẮT'));
+  updateTransport();
+}
+
 function updateTransport() {
   $('btnPlay').textContent = state.playing ? '⏸' : '▶';
   $('btnPlay').classList.toggle('active', state.playing);
   $('btnLoop').classList.toggle('active', state.loop);
+  const bf = $('btnFollow');
+  if (bf) bf.classList.toggle('on', state.follow);
   // REC hiển thị trên chip REC của dải đồng hồ (nút REC trên topbar đã bỏ)
   const chipRec = $('chipRec');
   if (chipRec) {
@@ -2664,7 +2753,7 @@ const menuActions = {
   zoomin: () => zoomPps(1.3),
   zoomout: () => zoomPps(1 / 1.3),
   home: () => setFrame(0),
-  follow: () => { state.follow = !state.follow; flashStatus('Theo thanh đò: ' + (state.follow ? 'BẬT' : 'TẮT')); },
+  follow: () => toggleFollow(),
   help: () => flashStatus('Quy trình: ① Bật OSC (panel KẾT NỐI OSC) + Bật Output trong Resolume (Preferences → OSC → 127.0.0.1:7000) ② Kéo nhạc vào lane A ③ Bật REC, Phát, gõ MIDI ④ Dừng REC, Play lại để chạy show. ⌘-click chọn nhiều cue. Kéo cue từ danh sách vào timeline = tạo bản sao (giữ Alt khi kéo trên timeline cũng vậy).'),
   testosc: () => openTestOsc(),
   convert: () => openConvTool()
@@ -2721,6 +2810,7 @@ $('btnPlay').addEventListener('click', togglePlay);
 $('btnStop').addEventListener('click', stop);
 $('btnHome').addEventListener('click', () => setFrame(0));
 $('btnLoop').addEventListener('click', () => { state.loop = !state.loop; updateTransport(); });
+$('btnFollow').addEventListener('click', toggleFollow);
 let recSnap = null;   // snapshot trước khi REC — tắt ghi là cả phiên thành MỘT bước hoàn tác
 function toggleRec() {
   state.recArmed = !state.recArmed;
@@ -2845,6 +2935,8 @@ function updateMidiChip() {
 }
 // «Hết phát» / «Tự chuyển bài» / «Theo thanh đò» đã bỏ UI theo thiết kế mới — giữ giá trị mặc định/trong dự án
 $('speedSel').addEventListener('change', (e) => {
+  // đổi tốc độ: neo lại clock tại vị trí hiện tại để không nhảy thời gian
+  clockReset(state.frame);
   state.speed = parseFloat(e.target.value) || 1;
   if (mode() === 'audio') audio.playbackRate = state.speed;
 });
@@ -3977,6 +4069,7 @@ window.addEventListener('keydown', (e) => {
     case 'r': case 'R': toggleRec(); break;
     case 's': case 'S': stop(); break;
     case 'l': case 'L': $('btnLoop').click(); break;
+    case 'f': case 'F': toggleFollow(); break;
     case 'c': case 'C':
       if (!e.metaKey && !e.ctrlKey && !e.altKey) setTlTool(state.tlTool === 'cut' ? 'select' : 'cut');
       break;
@@ -4690,8 +4783,7 @@ setTimeout(() => { midiScan(); }, 800);
     btnMini.classList.toggle('active', !!(s && s.open));
   });
 
-  // BROADCAST trạng thái (10Hz — đủ mượt cho timecode, nhẹ cho IPC)
-  let lastSig = '';
+  // BROADCAST trạng thái (20Hz — timer riêng, KHÔNG phụ thuộc rAF/visibility của cửa sổ chính)
   setInterval(() => {
     captureActiveProject();       // pstate mỗi bài luôn tươi trong danh sách broadcast
     const f = curFolder();
@@ -4699,6 +4791,7 @@ setTimeout(() => { midiScan(); }, 800);
     const st = {
       frame: Math.round(state.frame),
       fps: state.fps,
+      speed: state.speed,
       playing: state.playing,
       contentEnd: totalFrames(),
       curFolderId: f ? f.id : null,
@@ -4718,7 +4811,7 @@ setTimeout(() => { midiScan(); }, 800);
     // GỬI LUÔN mỗi tick (10Hz, payload nhỏ): cửa sổ SMALL có thể mở BẤT KỲ LÚC NÀO —
     // nếu chỉ gửi khi thay đổi, SMALL mở sau sẽ không bao giờ nhận được state đầu tiên
     window.hs.sendUiState(st);
-  }, 100);
+  }, 50);
 
   // NHẬN LỆNH từ Mini → thực thi trên engine DUY NHẤT này
   if (window.hs.onMiniCmd) window.hs.onMiniCmd((cmd) => {
