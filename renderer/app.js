@@ -759,6 +759,7 @@ function removeSong(id) {
   pause();
   if (audioSongId === song.id) audioSongId = null;
   if (wasActive) { audio.removeAttribute('src'); audio.load(); }
+  if (preview.songId === song.id) previewStop();   // đang nghe thử bài vừa xóa → dừng luôn
   renderSongs();
   updateAudioName();
   infoDirty = true;   // CÒN LẠI tính lại ngay, không giữ trọng số của bài vừa xóa
@@ -809,6 +810,9 @@ function songFmt(path) {
   return { label: ext ? ext.toUpperCase() : 'FILE', cls: 'fmt-' + (known.includes(ext) ? ext : 'other') };
 }
 
+/* nghe thử bài hát — tách khỏi engine timeline (khai báo sớm vì renderSongs dùng) */
+const preview = { audio: new Audio(), songId: null, raf: null };
+
 function renderSongs() {
   const box = $('songList');
   box.innerHTML = '';
@@ -817,7 +821,9 @@ function renderSongs() {
   state.songs.forEach((song, i) => {
     if (q && !song.name.toLowerCase().includes(q) && !String(i + 1).includes(q)) return;
     const item = document.createElement('div');
-    item.className = 'song-item' + (i === state.songIndex ? ' active' : '');
+    item.className = 'song-item' + (i === state.songIndex ? ' active' : '') +
+      (preview.songId != null && song.id === preview.songId ? ' previewing' : '');
+    item.dataset.songIdx = i;
     item.draggable = true;
 
     const info = document.createElement('div');
@@ -844,17 +850,26 @@ function renderSongs() {
     }
     info.append(nm, meta);
 
+    const pre = document.createElement('span');
+    pre.className = 'spre';
+    const sprog = document.createElement('div');
+    sprog.className = 'sprog';
+    const sprogFill = document.createElement('i');
+    sprog.appendChild(sprogFill);
+
     const del = document.createElement('button');
     del.className = 'sdel';
     del.textContent = '🗑';
     del.title = 'Xóa khỏi danh sách nhạc';
     del.addEventListener('click', (e) => { e.stopPropagation(); removeSong(song.id); });
 
-    item.append(info, del);
+    item.append(info, pre, del, sprog);
     item.addEventListener('click', (e) => {
       if (e.target === del) return;
       // CHỌN = chỉ lấy làm mốc thời gian — KHÔNG reset playhead, KHÔNG ngắt audio đang phát
+      const wasPlaying = !preview.audio.paused;
       activateSong(i, false, true);
+      if (wasPlaying) previewStart(true); else previewSetState(false);
     });
     item.addEventListener('dragstart', (e) => {
       e.dataTransfer.setData('text/hs-song', String(song.id));
@@ -869,6 +884,7 @@ function renderSongs() {
     em.textContent = q ? 'Không có bài khớp tìm kiếm' : 'Chưa có nhạc trong danh sách';
     box.appendChild(em);
   }
+  syncPreviewButtons();
 }
 
 function drawMiniWave(cv, song) {
@@ -1097,6 +1113,8 @@ function play() {
   // 'infinite' HOẶC nội dung ≤ 3 phút: phát tiếp từ chỗ playhead đang đứng, không tự dừng
   const pe = playbackEndFrames();
   if ((state.playbackEndMode || 'infinite') === 'contentEndPlus10' && isFinite(pe) && state.frame >= pe) setFrame(0);
+  // timeline phát → dừng nghe thử để không phát chồng 2 nguồn
+  if (!preview.audio.paused) { preview.audio.pause(); previewSetState(false); }
   state.playing = true;
   // nhạc do tick() bật khi playhead đi vào clip — timeline luôn chạy từ vị trí thanh đò
   if (state.recArmed && state.recMode === 'overwrite') {
@@ -1130,11 +1148,10 @@ function fireDue() {
 }
 
 function nextCue() {
-  // cue tiếp theo chỉ "mở" sau khi chạy HẾT chiều dài cue trước (t + duration)
+  // giống 404 TimeCode: chỉ chọn cue CHƯA bắt đầu (start > playhead), gần nhất
   for (const x of refreshVF()) {
     if (x.ev.enabled === false) continue;
-    const end = x.t + Math.max(0, x.ev.duration || 0);
-    if (end > state.frame) return x;
+    if (x.t > state.frame) return x;
   }
   return null;
 }
@@ -2649,7 +2666,8 @@ const menuActions = {
   home: () => setFrame(0),
   follow: () => { state.follow = !state.follow; flashStatus('Theo thanh đò: ' + (state.follow ? 'BẬT' : 'TẮT')); },
   help: () => flashStatus('Quy trình: ① Bật OSC (panel KẾT NỐI OSC) + Bật Output trong Resolume (Preferences → OSC → 127.0.0.1:7000) ② Kéo nhạc vào lane A ③ Bật REC, Phát, gõ MIDI ④ Dừng REC, Play lại để chạy show. ⌘-click chọn nhiều cue. Kéo cue từ danh sách vào timeline = tạo bản sao (giữ Alt khi kéo trên timeline cũng vậy).'),
-  testosc: () => openTestOsc()
+  testosc: () => openTestOsc(),
+  convert: () => openConvTool()
 };
 
 document.querySelectorAll('#menubar .menu').forEach((menu) => {
@@ -3071,6 +3089,69 @@ $('btnSortSongs').addEventListener('click', () => {
   renderSongs();
   scheduleAutosave();
 });
+
+/* ===== Nghe thử bài hát trực tiếp (độc lập timeline/cue) ===== */
+function previewUpdate() {
+  const song = state.songs.find((s) => s.id === preview.songId);
+  const el = $('songList')?.querySelector('.song-item.previewing');
+  if (!song || !el) return;
+  const d = preview.audio.duration || song.duration || 0;
+  const t = preview.audio.currentTime || 0;
+  const pre = el.querySelector('.spre');
+  if (pre) pre.textContent = `${fmtDur(t)} / ${fmtDur(d)}`;
+  const bar = el.querySelector('.sprog i');
+  if (bar) bar.style.width = (d > 0 ? (t / d) * 100 : 0) + '%';
+}
+function previewTick() {
+  previewUpdate();
+  if (!preview.audio.paused) preview.raf = requestAnimationFrame(previewTick);
+}
+function syncPreviewButtons() {
+  const has = state.songIndex >= 0;
+  const playing = !preview.audio.paused;
+  $('btnSongPlay').disabled = !has;
+  $('btnSongRestart').disabled = !has;
+  $('btnSongPause').disabled = !playing;
+  $('btnSongPlay').classList.toggle('on', playing);
+  $('btnSongPause').classList.toggle('on', !playing && preview.audio.currentTime > 0);
+}
+function previewSetState(playing) {
+  syncPreviewButtons();
+  if (playing) { previewUpdate(); cancelAnimationFrame(preview.raf); preview.raf = requestAnimationFrame(previewTick); }
+  else { cancelAnimationFrame(preview.raf); previewUpdate(); }
+}
+function previewStop() {
+  preview.audio.pause();
+  preview.songId = null;
+  document.querySelectorAll('.song-item.previewing').forEach((e) => {
+    e.classList.remove('previewing');
+    const p = e.querySelector('.sprog i'); if (p) p.style.width = '0%';
+    const t = e.querySelector('.spre'); if (t) t.textContent = '';
+  });
+  previewSetState(false);
+  renderSongs();
+}
+function previewStart(restart = false) {
+  const song = curSong();
+  if (!song || !song.path) return;
+  if (preview.songId !== song.id) {
+    preview.audio.src = fileUrl(song.path);
+    preview.songId = song.id;
+    preview.audio.currentTime = 0;
+  } else if (restart) {
+    preview.audio.currentTime = 0;
+  }
+  // dừng engine chính nếu đang phát để không phát chồng 2 nguồn
+  if (state.playing) pause();
+  preview.audio.play().then(() => {
+    renderSongs();
+    previewSetState(true);
+  }).catch((e) => setStatus('Không phát được bài: ' + e.message));
+}
+preview.audio.addEventListener('ended', () => previewSetState(false));
+$('btnSongPlay').addEventListener('click', () => previewStart(false));
+$('btnSongPause').addEventListener('click', () => { preview.audio.pause(); previewSetState(false); });
+$('btnSongRestart').addEventListener('click', () => previewStart(true));
 $('btnAddSong').addEventListener('click', async () => {
   const paths = await window.hs.openAudioMulti();
   if (paths && paths.length) {
@@ -3189,6 +3270,390 @@ function openTestOsc() {
 }
 
 function closeTestOsc() { $('testOscModal').style.display = 'none'; }
+
+/* =====================================================================
+   TOOL: CONVERT NHẠC — UI layer
+   UI chỉ nói chuyện với Conversion Manager (main process qua preload).
+   Không có process/scan nào chạy khi tool đóng.
+   ===================================================================== */
+const CONV = {
+  files: [],          // { id, path, rel, name, fmt, duration, size, checked, status, pct, err, speed }
+  running: false,
+  paused: false,
+  total: 0,
+  doneCount: 0,
+  wired: false
+};
+
+function convId() { return 'c' + (++idSeq); }
+
+function convFmtOf(p) {
+  const m = /\.([a-z0-9]+)$/i.exec(p || '');
+  return (m ? m[1] : 'AUDIO').toUpperCase().replace('AIF', 'AIFF');
+}
+
+function convTc(sec) {
+  if (!isFinite(sec) || sec <= 0) return '—';
+  const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+  return m + ':' + String(s).padStart(2, '0');
+}
+
+function convPcmOpts() {
+  const q = $('convPcmQ').value;
+  if (q === 'src') return { sampleRate: '', bitDepth: '', channels: '' };
+  const [sr, bd] = q.split('-');
+  return { sampleRate: sr === '44' ? 44100 : sr === '48' ? 48000 : 96000, bitDepth: bd === '16' ? '16' : '24', channels: '' };
+}
+
+function convSettings() {
+  const fmt = $('convFmt').value;
+  const s = {
+    format: fmt,
+    outDir: $('convOutDir').value,
+    keepTree: $('convKeepTree').checked,
+    meta: $('convMeta').checked,
+    dup: $('convDup').value,
+    openAfter: $('convOpenAfter').checked
+  };
+  if (fmt === 'wav' || fmt === 'aiff') Object.assign(s, convPcmOpts());
+  else if (fmt === 'mp3') { s.bitrate = Number($('convMp3Q').value); }
+  else if (fmt === 'flac') { Object.assign(s, convPcmOpts()); }
+  else { s.bitrate = Number($('convCompQ').value); }
+  return s;
+}
+
+function convGroups() {
+  const v = $('convFmt').value;
+  $('convGrpPcm').hidden = !(v === 'wav' || v === 'aiff' || v === 'flac');
+  $('convGrpMp3').hidden = v !== 'mp3';
+  $('convGrpComp').hidden = !(v === 'm4a' || v === 'ogg' || v === 'opus');
+  convWarn();
+}
+
+function convWarn() {
+  const hasMp3 = CONV.files.some((f) => f.checked && f.fmt === 'MP3');
+  $('convWarn').classList.toggle('show', hasMp3 && $('convFmt').value === 'wav');
+}
+
+function convRender() {
+  const box = $('convList');
+  const map = {
+    wait: ['wait', 'ĐANG CHỜ'], conv: ['conv', 'CONVERTING'], done: ['done', 'XONG'],
+    fail: ['fail', 'LỖI'], skip: ['skip', 'BỎ QUA'], cancel: ['cancel', 'ĐÃ HỦY']
+  };
+  box.innerHTML = CONV.files.map((f, i) => {
+    const m = map[f.status] || map.wait;
+    return `<div class="conv-row ${f.status === 'conv' ? 'conv' : ''} ${f.status === 'done' ? 'done' : ''} ${f.showErr ? 'showdetails' : ''}" draggable="true" data-i="${i}">
+      <input type="checkbox" ${f.checked ? 'checked' : ''} ${f.status === 'conv' ? 'disabled' : ''}>
+      <div class="conv-fnm"><b title="${f.path}">${f.name}</b><span class="conv-fprog"><i style="width:${f.pct || 0}%"></i></span></div>
+      <span class="conv-fmt ${f.fmt === 'WAV' ? 'wav' : f.fmt === 'FLAC' ? 'flac' : f.fmt === 'M4A' ? 'm4a' : ''}">${f.fmt}</span>
+      <span class="conv-dim">${convTc(f.duration)}</span>
+      <span class="conv-st ${m[0]}">${m[1]}</span>
+      <div class="conv-detail">${f.err || ''}</div>
+    </div>`;
+  }).join('') || '<div class="conv-empty">Chưa có file — kéo vào hoặc bấm ＋ File</div>';
+
+  box.querySelectorAll('.conv-row').forEach((el) => {
+    const i = Number(el.dataset.i);
+    const f = CONV.files[i];
+    if (!f) return;
+    el.querySelector('input').addEventListener('change', (e) => { f.checked = e.target.checked; convUpdate(); });
+    el.querySelector('.conv-st').addEventListener('click', () => {
+      if (f.status === 'fail') { f.showErr = !f.showErr; convRender(); }
+    });
+    el.addEventListener('dragstart', (e) => e.dataTransfer.setData('text/conv-idx', String(i)));
+    el.addEventListener('dragover', (e) => e.preventDefault());
+    el.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const from = Number(e.dataTransfer.getData('text/conv-idx'));
+      if (!Number.isInteger(from) || from === i) return;
+      const [moved] = CONV.files.splice(from, 1);
+      CONV.files.splice(i, 0, moved);
+      convRender();
+    });
+  });
+
+  $('convCount').textContent = CONV.files.length + ' file';
+  const totalDur = CONV.files.reduce((a, f) => a + (f.duration || 0), 0);
+  $('convSum').innerHTML = `<b>${CONV.files.length}</b> files • ${convTc(totalDur)}`;
+  convUpdate();
+}
+
+function convUpdate() {
+  const sel = CONV.files.filter((f) => f.checked && f.status !== 'conv').length;
+  $('convSelInfo').textContent = sel + ' được chọn';
+  convWarn();
+  const canRun = !CONV.running && CONV.files.some((f) => f.checked && ['wait', 'fail', 'cancel', 'done'].includes(f.status));
+  $('convRun').disabled = !canRun;
+  $('convPause').disabled = !CONV.running;
+  $('convPause').textContent = CONV.paused ? '▶' : '⏸';
+  $('convPause').title = CONV.paused ? 'Resume' : 'Pause';
+  $('convCancel').disabled = !CONV.running;
+}
+
+function convAddPaths(paths, relBase) {
+  if (!paths || !paths.length) return;
+  const before = CONV.files.length;
+  paths.forEach((p) => {
+    const rel = relBase ? pathDirRel(relBase, p) : '';
+    CONV.files.push({
+      id: convId(), path: p, rel, name: p.split('/').pop(),
+      fmt: convFmtOf(p), duration: 0, size: 0,
+      checked: true, status: 'wait', pct: 0, err: '', speed: 0
+    });
+  });
+  convRender();
+  // lấy duration bất đồng bộ, cập nhật dần
+  const slice = CONV.files.slice(before);
+  window.hs.convProbe(slice.map((f) => f.path)).then((durs) => {
+    slice.forEach((f, i) => { f.duration = durs[i] || 0; });
+    convRender();
+  }).catch(() => {});
+}
+
+function pathDirRel(base, full) {
+  if (!base || !full || !full.startsWith(base)) return '';
+  const rel = full.slice(base.length).replace(/^\/+/, '');
+  const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+  return dir;
+}
+
+async function convPickFiles() {
+  const paths = await window.hs.convPickFiles();
+  convAddPaths(paths);
+}
+
+async function convPickFolder(deep) {
+  const dir = await window.hs.convPickFolderIn();
+  if (!dir) return;
+  setStatus('Đang quét thư mục…');
+  try {
+    const found = await window.hs.convScanFolder(dir, deep);
+    if (!found.length) { flashStatus('Không tìm thấy file âm thanh trong thư mục.'); return; }
+    convAddPaths(found.map((x) => x.path), deep ? dir : '');
+    // gán rel + duration + size có sẵn từ scan (không probe lại)
+    const added = CONV.files.slice(-found.length);
+    added.forEach((f, i) => {
+      f.rel = found[i].rel || '';
+      f.duration = found[i].duration || 0;
+      f.size = found[i].size || 0;
+    });
+    convRender();
+    flashStatus(`Đã thêm ${found.length} file từ thư mục.`);
+  } catch (e) {
+    setStatus('Lỗi quét thư mục: ' + e.message);
+  }
+}
+
+function convStart() {
+  if (CONV.running) return;
+  if (!$('convOutDir').value) { flashStatus('Chọn thư mục lưu trước khi convert.'); return; }
+  // cho phép convert LẠI file đã xong (đổi chất lượng / đổi nơi lưu vẫn chạy được)
+  const sel = CONV.files.filter((f) => f.checked && ['wait', 'fail', 'cancel', 'done'].includes(f.status));
+  if (!sel.length) { flashStatus('Không có file nào được chọn để convert.'); return; }
+  sel.forEach((f) => { f.status = 'wait'; f.pct = 0; f.err = ''; f.showErr = false; });
+  CONV.jobMap = sel;               // map phản hồi index → đúng object file của lần chạy này
+  CONV.total = sel.length;
+  CONV.doneCount = 0;
+  $('convDone').classList.remove('show');
+  $('convBarBatch').style.width = '0%';
+  $('convPctBatch').textContent = '0/' + sel.length;
+  $('convBarFile').style.width = '0%';
+  $('convPctFile').textContent = '0%';
+  CONV.running = true;
+  CONV.paused = false;
+  convRender();
+  window.hs.convStart({
+    files: sel.map((f) => ({ path: f.path, rel: f.rel, duration: f.duration })),
+    opts: convSettings()
+  }).then((res) => {
+    CONV.total = res.total;
+    convUpdate();
+  }).catch((e) => {
+    CONV.running = false;
+    convUpdate();
+    flashStatus('Không bắt đầu được convert: ' + e.message);
+  });
+}
+
+function convWire() {
+  if (CONV.wired) return;
+  CONV.wired = true;
+
+  $('convClose').addEventListener('click', () => convClose());
+  $('convAddFiles').addEventListener('click', () => convPickFiles());
+  $('convDrop').addEventListener('click', () => convPickFiles());
+  $('convDrop').addEventListener('dragover', (e) => { e.preventDefault(); $('convDrop').classList.add('over'); });
+  $('convDrop').addEventListener('dragleave', () => $('convDrop').classList.remove('over'));
+  $('convDrop').addEventListener('drop', async (e) => {
+    e.preventDefault();
+    $('convDrop').classList.remove('over');
+    const paths = [];
+    for (const f of e.dataTransfer.files || []) {
+      const p = window.hs.filePath(f);
+      if (p) paths.push(p);
+    }
+    convAddPaths(paths);
+  });
+
+  $('convAddFolder').addEventListener('click', (e) => {
+    e.stopPropagation();
+    $('convFolderPop').classList.toggle('open');
+  });
+  document.addEventListener('click', () => $('convFolderPop').classList.remove('open'));
+  $('convFolderPop').querySelectorAll('button').forEach((b) => {
+    b.addEventListener('click', () => {
+      $('convFolderPop').classList.remove('open');
+      convPickFolder(b.dataset.mode === 'deep');
+    });
+  });
+
+  $('convSelAll').addEventListener('click', () => { CONV.files.forEach((f) => { f.checked = true; }); convRender(); });
+  $('convDeselAll').addEventListener('click', () => { CONV.files.forEach((f) => { f.checked = false; }); convRender(); });
+  $('convRmSel').addEventListener('click', () => {
+    CONV.files = CONV.files.filter((f) => !f.checked || f.status === 'conv');
+    convRender();
+  });
+  $('convClear').addEventListener('click', () => {
+    if (CONV.running) { flashStatus('Dừng convert trước khi xóa hàng đợi.'); return; }
+    CONV.files = [];
+    convRender();
+  });
+
+  $('convFmt').addEventListener('change', convGroups);
+  $('convPickOut').addEventListener('click', async () => {
+    const dir = await window.hs.convPickFolderOut();
+    if (dir) $('convOutDir').value = dir;
+  });
+
+  $('convRun').addEventListener('click', convStart);
+  $('convPause').addEventListener('click', () => {
+    if (!CONV.running) return;
+    CONV.paused = !CONV.paused;
+    if (CONV.paused) window.hs.convPause(); else window.hs.convResume();
+    convUpdate();
+  });
+  $('convCancel').addEventListener('click', () => {
+    if (!CONV.running) return;
+    window.hs.convCancel();
+    CONV.files.forEach((f) => {
+      if (f.status === 'conv' || (f.status === 'wait' && f.checked)) { f.status = 'cancel'; f.pct = 0; }
+    });
+    CONV.running = false;
+    CONV.paused = false;
+    $('convCur').textContent = 'Đã hủy — file tạm đã xóa';
+    $('convBarFile').style.width = '0%';
+    $('convPctFile').textContent = '0%';
+    convRender();
+  });
+
+  $('convRetry').addEventListener('click', () => {
+    CONV.files.forEach((f) => { if (f.status === 'fail') { f.status = 'wait'; f.pct = 0; f.err = ''; f.showErr = false; } });
+    convRender();
+    convStart();
+  });
+  $('convDoneBtn').addEventListener('click', () => { $('convDone').classList.remove('show'); $('convCur').textContent = 'Sẵn sàng'; });
+  $('convOpenFolder').addEventListener('click', () => {
+    const dir = $('convOutDir').value;
+    if (dir) window.hs.convOpenFolder(dir);
+  });
+
+  /* Sự kiện từ Conversion Manager */
+  window.hs.onConvItem((p) => {
+    // map theo ĐÚNG danh sách của lần chạy này (không theo trạng thái checked hiện tại)
+    const item = (CONV.jobMap && CONV.jobMap[p.i]) || CONV.files[p.i];
+    if (!item) return;
+    if (p.status === 'converting') {
+      item.status = 'conv'; item.pct = 0;
+      $('convCur').innerHTML = `Đang convert: <b>${item.name}</b> → ${p.out || ''}`;
+      convRender();
+    } else if (p.status === 'done') {
+      item.status = 'done'; item.pct = 100;
+      CONV.doneCount++;
+      $('convBarBatch').style.width = (CONV.doneCount / Math.max(1, CONV.total) * 100) + '%';
+      $('convPctBatch').textContent = CONV.doneCount + '/' + CONV.total;
+      convRender();
+    } else if (p.status === 'failed') {
+      item.status = 'fail'; item.err = p.error || 'Lỗi không xác định'; item.showErr = false;
+      convRender();
+    } else if (p.status === 'skipped') {
+      item.status = 'skip';
+      convRender();
+    } else if (p.status === 'cancelled') {
+      item.status = 'cancel'; item.pct = 0;
+      convRender();
+    } else {
+      if (typeof p.pct === 'number') {
+        item.pct = p.pct;
+        const row = $('convList').querySelector(`.conv-row[data-i="${CONV.files.indexOf(item)}"]`);
+        if (row) {
+          const bar = row.querySelector('.conv-fprog i');
+          if (bar) bar.style.width = p.pct + '%';
+        }
+        $('convBarFile').style.width = p.pct + '%';
+        $('convPctFile').textContent = Math.round(p.pct) + '%';
+      }
+      if (typeof p.speed === 'number') item.speed = p.speed;
+    }
+  });
+
+  window.hs.onConvState((p) => {
+    if (p.total) CONV.total = p.total;
+    if (typeof p.paused === 'boolean') CONV.paused = p.paused;
+    if (typeof p.running === 'boolean') CONV.running = p.running;
+    convUpdate();
+  });
+
+  window.hs.onConvDone((p) => {
+    CONV.running = false;
+    CONV.paused = false;
+    $('convCur').textContent = p.cancelled ? 'Đã hủy' : 'Hoàn tất';
+    $('convBarFile').style.width = '0%';
+    $('convPctFile').textContent = '0%';
+    const fail = p.failed || 0;
+    if (!p.cancelled) {
+      $('convDoneTitle').textContent = `${p.done} files converted successfully`;
+      $('convDoneStats').innerHTML =
+        `<span class="ok">Completed: ${p.done}</span><span class="er">Failed: ${fail}</span><span class="sk">Skipped: ${p.skipped || 0}</span>`;
+      $('convDone').classList.add('show');
+      $('convRetry').style.display = fail ? 'inline-flex' : 'none';
+      if (p.outDir && $('convOutDir').value) {
+        CONV.lastOutDir = p.outDir;
+      }
+      if ($('convOpenAfter').checked && p.outDir) window.hs.convOpenFolder(p.outDir);
+    }
+    convRender();
+  });
+}
+
+function convClose() {
+  if (CONV.running) window.hs.convCancel();   // đóng tool = dừng an toàn, xóa file tạm
+  CONV.running = false;
+  CONV.paused = false;
+  $('convModal').style.display = 'none';
+  $('convDone').classList.remove('show');
+  $('convBarFile').style.width = '0%';
+  $('convPctFile').textContent = '0%';
+}
+
+function openConvTool() {
+  $('convModal').style.display = 'flex';
+  convWire();
+  convGroups();
+  // mặc định lưu vào Downloads (chỉ set nếu người dùng chưa chọn thư mục)
+  if (!$('convOutDir').value) {
+    window.hs.convDefaultOut().then((dir) => {
+      if (dir && !$('convOutDir').value) $('convOutDir').value = dir;
+    }).catch(() => {});
+  }
+  convRender();
+  // kiểm tra FFmpeg chỉ khi MỞ tool
+  window.hs.convBins().then((b) => {
+    const el = $('convEngine');
+    if (!b.ffmpeg) { el.textContent = 'FFmpeg: không tìm thấy'; el.classList.add('bad'); }
+    else { el.textContent = 'FFmpeg ✓'; el.classList.remove('bad'); }
+  }).catch(() => {});
+}
 
 function renderTestOscRows() {
   const box = $('toRows');

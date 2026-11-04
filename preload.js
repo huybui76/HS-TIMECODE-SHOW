@@ -35,5 +35,22 @@ contextBridge.exposeInMainWorld('hs', {
   setMiniTop: (on) => ipcRenderer.send('mini-set-top', on),      // Always on Top (native API)
   onMiniSettings: (cb) => ipcRenderer.on('mini-settings', (_e, s) => cb(s)),
   onMiniState: (cb) => ipcRenderer.on('mini-state', (_e, s) => cb(s)),
-  miniFocusMain: () => ipcRenderer.send('mini-focus-main')
+  miniFocusMain: () => ipcRenderer.send('mini-focus-main'),
+
+  /* ===== TOOL: CONVERT NHẠC ===== */
+  convBins: () => ipcRenderer.invoke('conv-bins'),
+  convProbe: (paths) => ipcRenderer.invoke('conv-probe', paths),
+  convScanFolder: (dir, deep) => ipcRenderer.invoke('conv-scan-folder', dir, deep),
+  convStart: (payload) => ipcRenderer.invoke('conv-start', payload),
+  convPause: () => ipcRenderer.send('conv-pause'),
+  convResume: () => ipcRenderer.send('conv-resume'),
+  convCancel: () => ipcRenderer.send('conv-cancel'),
+  convPickFiles: () => ipcRenderer.invoke('conv-pick-files'),
+  convPickFolderIn: () => ipcRenderer.invoke('conv-pick-folder-in'),
+  convPickFolderOut: () => ipcRenderer.invoke('conv-pick-folder-out'),
+  convDefaultOut: () => ipcRenderer.invoke('conv-default-out'),
+  convOpenFolder: (dir) => ipcRenderer.invoke('conv-open-folder', dir),
+  onConvItem: (cb) => ipcRenderer.on('conv-item', (_e, p) => cb(p)),
+  onConvState: (cb) => ipcRenderer.on('conv-state', (_e, p) => cb(p)),
+  onConvDone: (cb) => ipcRenderer.on('conv-done', (_e, p) => cb(p))
 });

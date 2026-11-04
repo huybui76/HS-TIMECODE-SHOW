@@ -237,6 +237,57 @@ ipcMain.handle('file-stat', (_e, filePath) => {
   }
 });
 
+/* ===== TOOL: CONVERT NHẠC — Batch Audio Converter (FFmpeg) =====
+   Module riêng (conversion-manager.js). Chỉ sống khi tool được dùng:
+   không có process/worker/scan nào khi tool đóng. */
+const { ConversionManager } = require('./conversion-manager');
+const convMgr = new ConversionManager((channel, payload) => {
+  if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
+});
+
+ipcMain.handle('conv-bins', async () => convMgr.bins());
+ipcMain.handle('conv-probe', async (_e, paths) => convMgr.probe(paths));
+ipcMain.handle('conv-scan-folder', async (_e, dir, deep) => convMgr.scanFolder(dir, deep));
+ipcMain.handle('conv-start', async (_e, payload) => convMgr.start(payload));
+ipcMain.on('conv-pause', () => convMgr.pause());
+ipcMain.on('conv-resume', () => convMgr.resume());
+ipcMain.on('conv-cancel', () => convMgr.cancel());
+
+ipcMain.handle('conv-pick-files', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Chọn file âm thanh',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Audio', extensions: ['mp3', 'wav', 'flac', 'm4a', 'aac', 'aiff', 'aif', 'ogg', 'oga', 'opus', 'wma'] }]
+  });
+  return res.canceled ? [] : res.filePaths;
+});
+
+ipcMain.handle('conv-pick-folder-in', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Chọn thư mục chứa nhạc',
+    properties: ['openDirectory']
+  });
+  return res.canceled ? null : res.filePaths[0];
+});
+
+ipcMain.handle('conv-pick-folder-out', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Chọn thư mục lưu',
+    defaultPath: app.getPath('downloads'),
+    properties: ['openDirectory', 'createDirectory']
+  });
+  return res.canceled ? null : res.filePaths[0];
+});
+
+/* Thư mục lưu mặc định = Downloads */
+ipcMain.handle('conv-default-out', () => app.getPath('downloads'));
+
+ipcMain.handle('conv-open-folder', async (_e, dir) => {
+  const { shell } = require('electron');
+  if (dir && fs.existsSync(dir)) { shell.openPath(dir); return true; }
+  return false;
+});
+
 /* ===== Cửa sổ SMALL (Mini) — điều khiển từ xa, KHÔNG phải playback engine thứ hai =====
    • Mini chỉ GỬI lệnh (play/stop/trigger cue…) và NHẬN trạng thái — engine duy nhất nằm ở cửa sổ chính.
    • Always on Top dùng API native win.setAlwaysOnTop (macOS level 'screen-saver') — không phải CSS. */
@@ -254,6 +305,7 @@ function createMiniWindow() {
     minHeight: 280,
     backgroundColor: '#0d0d0f',
     title: 'HS TIMECODE · Mini',
+    icon: path.join(__dirname, 'build', 'icon.png'),
     alwaysOnTop: miniSettings.alwaysOnTop !== false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

@@ -42,7 +42,8 @@
       </div>
       <div class="menu"><button class="menu-btn">Tool</button>
         <div class="menu-drop">
-          <button data-act="testosc">🧪 Test OSC — nhận từ Resolume…</button>
+          <button data-act="convert" class="menu-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 17V7l11-2v10"/><circle cx="3.2" cy="18" r="2.4"/><circle cx="14.2" cy="16" r="2.4"/></svg>Convert nhạc</button>
+          <button data-act="testosc" class="menu-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 12h3l2.5-6 3 12 2.5-6h2"/><circle cx="19.5" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>Test OSC</button>
         </div>
       </div>
       <div class="menu"><button class="menu-btn">Trợ giúp</button>
@@ -131,6 +132,11 @@
           <span class="spacer"></span>
           <button id="btnSongSearch" class="icon-btn" title="Tìm bài hát — bấm để mở/đóng ô tìm">🔍</button>
           <button id="btnSortSongs" title="Sắp xếp A→Z">A→Z</button>
+          <span class="songplay" role="group" aria-label="Phát bài hát đang chọn">
+            <button id="btnSongPlay" class="spbtn play" title="Phát bài đang chọn (từ vị trí đang đứng)" disabled>▶</button>
+            <button id="btnSongPause" class="spbtn pause" title="Dừng phát — giữ vị trí để phát tiếp" disabled>⏸</button>
+            <button id="btnSongRestart" class="spbtn restart" title="Phát lại bài đang chọn từ đầu" disabled>↺</button>
+          </span>
           <button id="btnAddSong" class="primary" title="Thêm bài hát">＋ Thêm</button>
         </div>
         <input id="songSearch" class="search" placeholder="🔍 Tìm bài hát — tên hoặc số…" hidden>
@@ -386,6 +392,141 @@
         <span>THỜI GIAN</span><span>ĐỊA CHỈ OSC</span><span>LOẠI</span><span>ĐỐI SỐ</span>
       </div>
       <div id="toRows"></div>
+    </div>
+  </div>
+
+  <!-- ===== Tool CONVERT NHẠC — Batch Audio Converter ===== -->
+  <div id="convModal" class="modal" style="display:none">
+    <div class="modal-box convbox">
+      <div class="conv-head">
+        <span class="conv-title">CONVERT NHẠC</span>
+        <span id="convCount" class="conv-chip">0 file</span>
+        <span class="spacer"></span>
+        <span id="convEngine" class="conv-engine">FFmpeg</span>
+        <button id="convClose" class="mini" title="Đóng tool — dừng queue, xóa file tạm">✕</button>
+      </div>
+
+      <div class="conv-body">
+        <div class="conv-left">
+          <div id="convDrop" class="conv-drop">⇣ Kéo file vào đây — hoặc <b>bấm để thêm</b><br>
+            <span>MP3 · WAV · FLAC · M4A · OGG · AIFF · Opus</span></div>
+
+          <div class="conv-addrow">
+            <button id="convAddFiles" class="cbtn primary">＋ File</button>
+            <span class="conv-folderwrap">
+              <button id="convAddFolder" class="cbtn">＋ Thư mục ▾</button>
+              <div id="convFolderPop" class="conv-fpop">
+                <button data-mode="flat">Chỉ file trong folder</button>
+                <button data-mode="deep">Quét cả subfolder</button>
+              </div>
+            </span>
+            <span class="spacer"></span>
+            <button class="conv-link" id="convSelAll">Chọn hết</button>
+            <button class="conv-link" id="convDeselAll">Bỏ chọn</button>
+            <button class="conv-link" id="convRmSel">Xóa chọn</button>
+            <button class="conv-link" id="convClear">Xóa hết</button>
+          </div>
+
+          <div class="conv-qhead"><span></span><span>TÊN FILE</span><span>FORMAT</span><span>DURATION</span><span>TRẠNG THÁI</span></div>
+          <div id="convList" class="conv-list"></div>
+
+          <div class="conv-qfoot"><span id="convSum"><b>0</b> files • 00:00</span><span class="spacer"></span><span id="convSelInfo">0 được chọn</span></div>
+        </div>
+
+        <div class="conv-right">
+          <div class="conv-sec">
+            <label class="conv-lbl">FORMAT RA</label>
+            <select id="convFmt">
+              <option value="wav" selected>WAV</option>
+              <option value="mp3">MP3</option>
+              <option value="flac">FLAC</option>
+              <option value="m4a">M4A / AAC</option>
+              <option value="ogg">OGG</option>
+              <option value="aiff">AIFF</option>
+              <option value="opus">Opus</option>
+            </select>
+          </div>
+
+          <div class="conv-sec" id="convGrpPcm">
+            <label class="conv-lbl">CHẤT LƯỢNG</label>
+            <select id="convPcmQ">
+              <option value="48-24">48 kHz · 24-bit</option>
+              <option value="44-16">44.1 kHz · 16-bit</option>
+              <option value="96-24">96 kHz · 24-bit</option>
+              <option value="src" selected>Giữ nguyên gốc</option>
+            </select>
+          </div>
+
+          <div class="conv-sec" id="convGrpMp3" hidden>
+            <label class="conv-lbl">BITRATE</label>
+            <select id="convMp3Q">
+              <option value="128">128 kbps</option>
+              <option value="192">192 kbps</option>
+              <option value="256">256 kbps</option>
+              <option value="320" selected>320 kbps</option>
+            </select>
+          </div>
+
+          <div class="conv-sec" id="convGrpComp" hidden>
+            <label class="conv-lbl">BITRATE</label>
+            <select id="convCompQ">
+              <option value="128">128 kbps</option>
+              <option value="192">192 kbps</option>
+              <option value="256" selected>256 kbps</option>
+              <option value="320">320 kbps</option>
+            </select>
+          </div>
+
+          <div class="conv-sec">
+            <label class="conv-lbl">LƯU TẠI</label>
+            <div class="conv-folder">
+              <input type="text" id="convOutDir" value="" placeholder="Chưa chọn thư mục…" readonly>
+              <button id="convPickOut" class="cbtn">Chọn…</button>
+            </div>
+            <label class="conv-chk" style="margin-top:5px"><input type="checkbox" id="convKeepTree" checked> Giữ cấu trúc thư mục</label>
+            <label class="conv-chk" style="margin-top:4px"><input type="checkbox" id="convMeta" checked> Giữ metadata</label>
+            <div id="convWarn" class="conv-warn">⚠ MP3 → WAV không khôi phục được chất lượng đã mất.</div>
+          </div>
+
+          <div class="conv-sec">
+            <label class="conv-lbl">TRÙNG TÊN</label>
+            <select id="convDup">
+              <option value="auto" selected>Auto Rename</option>
+              <option value="overwrite">Overwrite</option>
+              <option value="skip">Skip</option>
+            </select>
+          </div>
+
+          <div class="conv-sec">
+            <label class="conv-chk"><input type="checkbox" id="convOpenAfter"> Mở folder khi xong</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="conv-foot">
+        <div class="conv-brow">
+          <span id="convCur" class="conv-cur">Sẵn sàng</span>
+          <div class="conv-bars">
+            <div class="conv-bar file"><i id="convBarFile"></i></div><span id="convPctFile" class="conv-pct">0%</span>
+            <div class="conv-bar batch"><i id="convBarBatch"></i></div><span id="convPctBatch" class="conv-pct">0/0</span>
+          </div>
+          <div class="conv-actions">
+            <button id="convPause" class="cbtn pausebtn" disabled>⏸</button>
+            <button id="convCancel" class="cbtn danger" disabled>✕</button>
+            <button id="convRun" class="cbtn run">▶ Convert</button>
+          </div>
+        </div>
+
+        <div id="convDone" class="conv-done">
+          <div class="conv-done1"><span class="conv-done-ic">✓</span><span id="convDoneTitle">Conversion Complete</span></div>
+          <div id="convDoneStats" class="conv-done2"></div>
+          <div class="conv-done3">
+            <button id="convRetry" class="cbtn small">↻ Retry Failed</button>
+            <button id="convOpenFolder" class="cbtn small">📂 Mở folder</button>
+            <button id="convDoneBtn" class="cbtn small primary">Done</button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
