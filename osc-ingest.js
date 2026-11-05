@@ -5,12 +5,14 @@ const { performance, monitorEventLoopDelay } = require('node:perf_hooks');
 const CFG = require('./realtime-config');
 const { OscFilter, parsePacket } = require('./osc-parser');
 const { OscRing } = require('./osc-ring');
+const { RecordingSession } = require('./recording-session');
 
 const nowEpoch = () => performance.timeOrigin + performance.now();
 const ring = new OscRing();
 const filter = new OscFilter();
 let port = null;
 let udp = null;
+let socketReady = false;
 let listenPort = 7000;
 let recording = false;
 let learnMode = false;
@@ -34,6 +36,19 @@ const eventQueue = new Array(CFG.OSC_EVENT_QUEUE_CAPACITY);
 let queueHead = 0;
 let queueCount = 0;
 let queueBytes = 0;
+let recorder = null;
+let recSession = null;
+let recCutoff = null;
+let actionBytes = 0;
+let actionBatchSeq = 0;
+let floatLearningUntil = 0;
+const actionQueue = [];
+const actionInFlight = new Map();
+const echoTokens = [];
+const pendingMappings = new Map();
+let lastRecordWarning = -Infinity;
+let previewInFlight = false;
+let lastPreviewAt = -Infinity;
 const loopDelay = monitorEventLoopDelay({ resolution: CFG.OSC_STATS_RESOLUTION_MS });
 const stats = {
   pkts: 0, idlePackets: 0, msgTotal: 0, msgKept: 0, msgFiltered: 0,
@@ -77,7 +92,9 @@ function updateStats() {
   stats.droppedPerSec = Math.round((stats.droppedOverflow - previous.dropped) * scale);
   stats.rendererMessagesPerSec = Math.round((sends - previous.sends) * scale);
   previous = { t, pkts: stats.pkts, messages: stats.msgTotal, filtered: stats.msgFiltered, dropped: stats.droppedOverflow, sends };
-  stats.queueDepth = queueCount + [...inFlight.values()].reduce((sum, count) => sum + count, 0);
+  stats.queueDepth = queueCount + actionQueue.length +
+    [...inFlight.values()].reduce((sum, count) => sum + count, 0) +
+    [...actionInFlight.values()].reduce((sum, batch) => sum + batch.items.length, 0);
   stats.ringEntries = ring.count;
   stats.ringOverflow = ring.overflow;
   stats.addressOverflow = ring.addressOverflow;
@@ -171,6 +188,7 @@ function openSocket() {
   });
   socket.on('listening', () => {
     if (udp !== socket) return;
+    socketReady = true;
     stats.recvBufRequested = CFG.OSC_RECV_BUFFER_BYTES;
     try { socket.setRecvBufferSize(CFG.OSC_RECV_BUFFER_BYTES); }
     catch (error) { reportError('UDP receive buffer: ' + error.message); }
@@ -189,6 +207,7 @@ function closeSocket() {
   stopStats();
   const old = udp;
   udp = null;
+  socketReady = false;
   if (old) { try { old.close(); } catch (_) {} }
   const message = { type: 'closed' };
   if (!postMain(message)) post(message);
@@ -196,6 +215,46 @@ function closeSocket() {
 
 function isDiscrete(address) {
   return address.endsWith('/connect') || address.endsWith('/clear') || address.endsWith('/playmode');
+}
+
+function queueAction(action) {
+  const bytes = retainedSize(action);
+  if (actionQueue.length >= CFG.REC_ACTION_QUEUE_CAPACITY || actionBytes + bytes > CFG.OSC_EVENT_QUEUE_BYTES) {
+    stats.droppedOverflow++;
+    recordWarning('REC action queue overflow; recording is incomplete.');
+    return;
+  }
+  actionQueue.push(action);
+  actionBytes += bytes;
+}
+
+function recordWarning(text) {
+  const t = nowEpoch();
+  if (t - lastRecordWarning < CFG.OSC_DEBUG_INTERVAL_MS) return;
+  lastRecordWarning = t;
+  post({ type: 'recordWarning', session: recSession, text });
+}
+
+function flushActions() {
+  while (port && actionQueue.length && actionInFlight.size < CFG.REC_ACTION_MAX_IN_FLIGHT) {
+    const items = actionQueue.slice(0, CFG.REC_ACTION_BATCH_SIZE);
+    const batchId = ++actionBatchSeq;
+    const mappings = [...pendingMappings].slice(0, CFG.REC_ACTION_BATCH_SIZE);
+    const batch = { type: 'recordActions', session: recSession, batchId, items, mappings };
+    actionInFlight.set(batchId, batch);
+    if (!post(batch)) { actionInFlight.delete(batchId); break; }
+    for (const [key] of mappings) pendingMappings.delete(key);
+    actionQueue.splice(0, items.length);
+    stats.eventSent += items.length;
+    stats.eventBatches++;
+  }
+  if (recorder && recCutoff !== null && recorder.isDrained() && !actionQueue.length && !actionInFlight.size) {
+    pendingMappings.clear();
+    post({ type: 'recordDrained', session: recSession, cutoff: recCutoff });
+    recorder = null;
+    recSession = null;
+    recCutoff = null;
+  }
 }
 
 function retainedSize(value) {
@@ -206,6 +265,11 @@ function retainedSize(value) {
     for (const item of value) bytes += retainedSize(item);
     return bytes;
   }
+  if (value && typeof value === 'object') {
+    let bytes = 0;
+    for (const [key, item] of Object.entries(value)) bytes += key.length * 2 + retainedSize(item);
+    return bytes;
+  }
   return 8;
 }
 
@@ -213,10 +277,14 @@ function onPacket(buffer) {
   stats.pkts++;
   rxDelta++;
   // A visible monitor is not permission to decode arbitrary background telemetry.
-  if (!recording && !learnMode && !captureSeen) { stats.idlePackets++; return; }
+  if (!recording && !recorder && !learnMode && !captureSeen) { stats.idlePackets++; return; }
   const t = nowEpoch();
   const result = parsePacket(buffer, filter, { onMessage(address, args) {
     stats.msgKept++;
+    const echoIndex = echoTokens.findIndex((item) => item.t <= t && t - item.t <= CFG.REC_ECHO_WINDOW_MS &&
+      item.address === address && item.signature === JSON.stringify(args));
+    if (echoIndex >= 0) echoTokens.splice(echoIndex, 1);
+    else if (recorder) recorder.ingestOsc({ address, args, t, seq: ++sequence });
     const value = args.find((arg) => typeof arg === 'number' || typeof arg === 'boolean');
     if (value !== undefined) {
       if (!ring.push(address, Number(value), t, isDiscrete(address) ? 1 : 0)) stats.msgRateLimited++;
@@ -268,7 +336,15 @@ function finalizeMidi(id) {
 
 function maintain() {
   const t = nowEpoch();
+  while (echoTokens.length && t - echoTokens[0].t > CFG.REC_ECHO_WINDOW_MS) echoTokens.shift();
   ring.flushPending(t);
+  filter.setLearning(learnMode || captureSeen || t < floatLearningUntil);
+  if (recorder) recorder.tick(t);
+  flushActions();
+  if (recorder && !previewInFlight && t - lastPreviewAt >= CFG.REC_PREVIEW_MS) {
+    lastPreviewAt = t;
+    previewInFlight = post({ type: 'recordPreview', session: recSession, items: recorder.preview(t) });
+  }
   // Resolve only on MIDI deadlines, never scan pending MIDI for each OSC packet.
   for (const [id, midi] of pendingMidi) {
     // Cache a note's onset match before ring retention expires; deliver only after release.
@@ -285,13 +361,20 @@ function attachPort(next) {
   if (port) { try { port.close(); } catch (_) {} }
   stats.droppedOverflow += [...inFlight.values()].reduce((sum, count) => sum + count, 0);
   inFlight.clear();
+  if (actionInFlight.size) {
+    stats.droppedOverflow += [...actionInFlight.values()].reduce((sum, batch) => sum + batch.items.length, 0);
+    actionInFlight.clear();
+    actionBytes = actionQueue.reduce((sum, action) => sum + retainedSize(action), 0);
+  }
   uiInFlight = false;
+  previewInFlight = false;
   port = next;
   port.on('message', (event) => handleMessage(event.data));
   if (port.start) port.start();
   post({ type: 'portReady' });
   postMain({ type: 'portReady' });
   flushEvents();
+  flushActions();
 }
 
 function handleMessage(message) {
@@ -315,13 +398,87 @@ function handleMessage(message) {
       recording = !!message.on;
       session = message.session === undefined ? session : message.session;
       break;
+    case 'recStart':
+      if (recorder) {
+        post({ type: 'recordRejected', session: message.session, text: 'Previous recording session has not drained.' });
+        break;
+      }
+      if (!udp || !socketReady) {
+        post({ type: 'recordRejected', session: message.session, text: 'OSC UDP input is not listening.' });
+        break;
+      }
+      recSession = message.session;
+      recCutoff = null;
+      echoTokens.length = 0;
+      pendingMappings.clear();
+      lastRecordWarning = -Infinity;
+      lastPreviewAt = -Infinity;
+      previewInFlight = false;
+      recorder = new RecordingSession({
+        config: { USE_LEARNED_MAPPING_FALLBACK: message.config &&
+          typeof message.config.USE_LEARNED_MAPPING_FALLBACK === 'boolean'
+          ? message.config.USE_LEARNED_MAPPING_FALLBACK : CFG.USE_LEARNED_MAPPING_FALLBACK },
+        emit: queueAction,
+        onMapping: (key, mapping) => {
+          if (pendingMappings.size < CFG.REC_MAPPING_MAX || pendingMappings.has(key)) pendingMappings.set(key, mapping);
+          else recordWarning('MIDI mapping table is full.');
+        },
+        onWarning: recordWarning
+      });
+      try {
+        recorder.start(message);
+        post({ type: 'recordStarted', session: recSession });
+      } catch (error) {
+        recorder = null;
+        recSession = null;
+        recCutoff = null;
+        post({ type: 'recordRejected', session: message.session, text: error.message });
+      }
+      break;
+    case 'recMidi':
+      if (recorder && message.session === recSession && recCutoff === null) {
+        if (message.event && message.event.kind === 'cc') {
+          floatLearningUntil = nowEpoch() + CFG.FLOAT_IDLE_TIMEOUT_MS + CFG.MATCH_WINDOW_MS;
+          filter.setLearning(true);
+        }
+        recorder.midi(message.event);
+      }
+      break;
+    case 'recTx':
+      if (recorder && echoTokens.length < CFG.REC_ECHO_MAX_PENDING) {
+        echoTokens.push({ address: message.address, signature: JSON.stringify(message.args), t: message.t ?? nowEpoch() });
+      }
+      break;
+    case 'recStop':
+      if (recorder && message.session === recSession && recCutoff === null) {
+        recCutoff = Number.isFinite(message.cutoff) ? message.cutoff : nowEpoch();
+        recorder.finish(recCutoff);
+        recorder.tick(nowEpoch());
+        flushActions();
+      }
+      break;
+    case 'recordAck':
+      if (actionInFlight.has(message.batchId)) {
+        for (const action of actionInFlight.get(message.batchId).items) actionBytes -= retainedSize(action);
+      }
+      actionInFlight.delete(message.batchId);
+      flushActions();
+      break;
+    case 'previewAck': previewInFlight = false; break;
+    case 'recAbort':
+      if (message.session === recSession) {
+        recorder = null; recSession = null; recCutoff = null;
+        actionQueue.length = 0; actionInFlight.clear(); pendingMappings.clear(); actionBytes = 0;
+        previewInFlight = false;
+      }
+      break;
     case 'learn':
       learnMode = !!message.on;
-      filter.setLearning(learnMode || captureSeen);
+      filter.setLearning(learnMode || captureSeen || nowEpoch() < floatLearningUntil);
       break;
     case 'captureSeen':
       captureSeen = !!message.on;
-      filter.setLearning(learnMode || captureSeen);
+      filter.setLearning(learnMode || captureSeen || nowEpoch() < floatLearningUntil);
       break;
     case 'uiVisible':
       uiVisible = !!message.on;

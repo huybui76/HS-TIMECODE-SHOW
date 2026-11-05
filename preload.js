@@ -46,8 +46,8 @@ contextBridge.exposeInMainWorld('hs', {
   onOscBatch: (cb) => ipcRenderer.on('osc-in-batch', (_e, batch) => cb(batch)),
   onStatus: (cb) => ipcRenderer.on('osc-status', (_e, s) => cb(s)),
   onStats: (cb) => ipcRenderer.on('stats', (_e, s) => cb(s)),
-  send: (address, args, host, port) =>
-    ipcRenderer.invoke('osc-send', { address, args, host, port }),
+  send: (address, args, host, port, targetIds) =>
+    ipcRenderer.invoke('osc-send', { address, args, host, port, targetIds }),
   setListenPort: (p) => ipcRenderer.invoke('port-set', p),
   setOscFloatAddresses: (addresses) => ipcRenderer.invoke('osc-float-addresses', addresses),
   oscEnable: () => ipcRenderer.invoke('osc-enable'),     // người dùng BẬT Main OSC → mới bind cổng

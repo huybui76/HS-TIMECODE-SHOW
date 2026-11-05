@@ -8,6 +8,7 @@
 
 const dgram = require('dgram');
 const osc = require('osc');
+const { encodeOsc } = require('./osc-encode');
 
 const DEFAULTS = {
   port: 7001,
@@ -70,11 +71,12 @@ class OscTargets {
   }
 
   /* Gửi 1 gói OSC tới TẤT CẢ target đang bật (song song, không chặn) */
-  send(address, args) {
-    const buf = Buffer.from(osc.writePacket({ address, args: args || [] }));
+  send(address, args, targetIds) {
+    const buf = encodeOsc(address, args);
+    const selected = Array.isArray(targetIds) ? new Set(targetIds) : null;
     let sentCount = 0;
     for (const t of this.targets) {
-      if (!t.enabled) continue;
+      if (!t.enabled || (selected && !selected.has(t.id))) continue;
       this.sockInstance().send(buf, t.port, t.host, (err) => {
         if (err) {
           t.lastError = String(err.message || err);
@@ -154,7 +156,7 @@ class OscTargets {
   }
 
   sendTo(t, address, args) {
-    const buf = Buffer.from(osc.writePacket({ address, args: args || [] }));
+    const buf = encodeOsc(address, args);
     this.sockInstance().send(buf, t.port, t.host, () => {});
     t.sent = (t.sent || 0) + 1;
   }

@@ -76,6 +76,7 @@ function harness() {
       if (name === 'fs') return { readFileSync() { throw new Error('no saved mini settings'); } };
       if (name === './realtime-config') return config;
       if (['dgram', 'osc', './osc-targets', './lan-sync'].includes(name)) return {};
+      if (name === './osc-encode') return { encodeOsc: (address, args) => Buffer.from(JSON.stringify({ address, args })) };
       throw new Error(`Unexpected require: ${name}`);
     },
     setTimeout(fn, delay) { const id = nextTimer++; timeouts.set(id, { fn, delay }); return id; },

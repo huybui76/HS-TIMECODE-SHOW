@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const dgram = require('dgram');
 const osc = require('osc');
+const { encodeOsc } = require('./osc-encode');
 const { OscTargets } = require('./osc-targets');
 const { LanSync } = require('./lan-sync');
 const realtimeConfig = require('./realtime-config');
@@ -324,6 +325,11 @@ ipcMain.handle('osc-send', (_e, payload) => {
   const args = payload.args || [];
   try {
     const t = ensureOscTargets();
+    if (Array.isArray(payload.targetIds)) {
+      const n = t.send(addr, args, payload.targetIds);
+      stats.tx += n;
+      return n;
+    }
     if (t.targets.some((x) => x.enabled)) {
       // Đa địa chỉ: gửi song song tất cả target đang bật
       const n = t.send(addr, args);
@@ -333,7 +339,7 @@ ipcMain.handle('osc-send', (_e, payload) => {
     // Chưa cấu hình target nào → dùng host/port cũ (tương thích)
     const host = payload.host || target.host;
     const port = Number(payload.port) || target.port;
-    const buf = Buffer.from(osc.writePacket({ address: addr, args }));
+    const buf = encodeOsc(addr, args);
     senderPort().send(buf, port, host, (err) => {
       if (err) console.error('[osc-send] lỗi gửi:', err.message);
     });

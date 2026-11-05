@@ -9,6 +9,7 @@ const state = {
   loop: false,
   recArmed: false,
   recMode: 'overdub',      // 'overdub' | 'overwrite'
+  useLearnedMappingFallback: !!window.HSRealtime.USE_LEARNED_MAPPING_FALLBACK,
   recSource: 'midi',       // 'midi' = ghi từ đàn/pad (Web MIDI) | 'osc' = ghi từ OSC Resolume gửi về
   midiDeviceId: null,      // thiết bị MIDI vào đang chọn (Web MIDI id)
   midiTpl: '/midi/note/{n}',   // mẫu địa chỉ OSC cho pad: {n} = note 0-127, {c} = kênh 1-16
@@ -24,6 +25,7 @@ const state = {
                            //   srcEnd=sourceEnd (tlEnd = tlStart + srcEnd − srcStart), volume, fadeIn, fadeOut}] — toàn bộ GIÂY
   selClipId: null,         // instance clip nhạc đang chọn trên timeline
   recLaneId: null,         // lane R nhận cue khi ghi
+  laneGroupMode: window.HSRealtime.LANE_GROUP_MODE,
   songs: [],               // [{id, name, path, duration, size, peaks, decoding}]
   songIndex: -1,           // bài đang làm mốc thời gian (nguồn đồng hồ)
   autoAdvance: true,
@@ -75,7 +77,9 @@ let oscAnchor = { epoch: performance.timeOrigin + performance.now(), frame: 0, s
 let oscCaptureSeen = false;
 const oscRecSeen = new Map();     // "folderId|address|frame" -> continuous cue
 const recTransactions = new Map();
+const recLive = new Map(); // UI-only snapshots, never part of the project or playback cache.
 let recActiveSession = null;
+let oscAssignCue = null;
 
 function syncOscFloatAddresses() {
   if (!window.hs.setOscFloatAddresses) return;
@@ -249,10 +253,50 @@ function sortLanesByKind() {
   const groups = { V: [], A: [], R: [] };
   state.lanes.forEach((l) => { (groups[l.kind] || groups.V).push(l); });
   state.lanes = [...groups.V, ...groups.A, ...groups.R];
+  const f = curFolder();
+  if (f) f.lanes = state.lanes;
+}
+
+function recSyncLaneGroups(f) {
+  const groups = {};
+  for (const lane of f.lanes || []) {
+    if (lane.kind !== 'R' || !lane.recGroup) continue;
+    (groups[lane.recGroup] || (groups[lane.recGroup] = [])).push(lane.name);
+  }
+  f.laneGroups = groups;
+  if (f.id === state.activeFolderId) laneAlloc.importGroups(groups);
+}
+
+function recNormalizeLanes(f = curFolder(), removeEmpty = REC_CFG.AUTO_REMOVE_EMPTY_LANES) {
+  if (!f) return;
+  const active = f.id === state.activeFolderId;
+  const lanes = active ? state.lanes : (f.lanes || []);
+  // Only renderer-owned rows may be removed; a user-created +R is never a spare.
+  const kept = lanes.filter((lane) => !(removeEmpty && lane.kind === 'R' && lane.autoRec === true
+    && !lane.manual && !lane.manualLane && !lane.locked
+    && !f.events.some((event) => event.laneId != null ? event.laneId === lane.id : event.lane === lane.name)));
+  const normalized = window.HSCueLayout.normalizeLanes(kept, f.events, { removeEmpty: false });
+  const byId = new Map(lanes.map((lane) => [lane.id, lane]));
+  lanes.splice(0, lanes.length, ...normalized.lanes.map((lane) => Object.assign(byId.get(lane.id), lane)));
+  normalized.events.forEach((event, index) => { f.events[index].lane = event.lane; });
+  const roots = new Map();
+  for (const lane of lanes) {
+    if (!lane.recGroup) continue;
+    if (!roots.has(lane.recGroup)) roots.set(lane.recGroup, lane.id);
+    lane.auxiliary = roots.get(lane.recGroup) !== lane.id;
+    lane.auxOf = lane.auxiliary ? roots.get(lane.recGroup) : null;
+  }
+  f.lanes = lanes;
+  let pointer = active ? state.recLaneId : f.recLaneId;
+  if (!lanes.some((lane) => lane.id === pointer)) pointer = (lanes.find((lane) => lane.kind === 'R') || {}).id || null;
+  f.recLaneId = pointer;
+  if (active) { state.lanes = lanes; state.recLaneId = pointer; }
+  recSyncLaneGroups(f);
 }
 
 function addLane(kind, silent) {
   const lane = { id: nid(), name: nextLaneName(kind), kind, songId: null, songOffset: 0, songEnd: 0, locked: false };
+  if (kind === 'R') { lane.autoRec = !!silent; lane.manual = !silent; }
   const fi = state.lanes.findIndex((l) => l.kind === kind);
   if (kind === 'V') {
     // + V: chèn TRÊN cùng nhóm V (trên mọi lane V cũ, dưới không có gì)
@@ -263,7 +307,8 @@ function addLane(kind, silent) {
   }
   if (kind === 'R' && !state.recLaneId) state.recLaneId = lane.id;
   sortLanesByKind();
-  if (!silent) { renderLanes(); renderTimelineHeader(); scheduleAutosave(); }
+  recNormalizeLanes(curFolder(), false);
+  if (!silent) { renderLanes(); renderTimelineHeader(); noteChange(); scheduleAutosave(); }
   return lane;
 }
 
@@ -275,22 +320,25 @@ function removeLane(id) {
   if (cueCount && !confirm(`Lane ${lane.name} có ${cueCount} cue. Xóa lane? (các cue trong lane sẽ bị XÓA luôn)`)) return;
   state.lanes.splice(i, 1);
   // xóa lane = xóa luôn các cue ĐẶT trên lane đó (không dời sang lane khác)
-  state.folders.forEach((f) => {
+  const f = curFolder();
+  if (f) {
     f.events = f.events.filter((ev) => {
       if (ev.lane !== lane.name) return true;
       state.multiSel.delete(ev);
       if (state.sel === ev) state.sel = null;
       return false;
     });
-  });
+  }
   if (state.recLaneId === id) {
     const r = state.lanes.find((l) => l.kind === 'R');
     state.recLaneId = r ? r.id : null;
   }
   sortLanesByKind();
+  recNormalizeLanes(f);
   rebuildFlat();
   renderLanes();
   fillRecLaneSel();
+  noteChange();
   scheduleAutosave();
 }
 
@@ -304,7 +352,7 @@ function ensureLanesForProject() {
   const names = new Set((f ? f.events : []).map((x) => x.lane));
   names.forEach((name) => {
     if (!laneByName(name)) {
-      const kind = /^[VA]/.test(name) ? name[0] : 'V';
+      const kind = /^[VAR]/.test(name) ? name[0] : 'V';
       state.lanes.push({ id: nid(), name, kind, songId: null, songOffset: 0, songEnd: 0, locked: false });
     }
   });
@@ -320,6 +368,7 @@ function ensureLanesForProject() {
     state.recLaneId = r ? r.id : state.lanes[0].id;
   }
   sortLanesByKind(); // nạp lại dự án cũ lộn xộn thứ tự: V trên · A giữa · R dưới
+  recNormalizeLanes(f, false);
 }
 
 function renderLanes() {
@@ -350,10 +399,12 @@ function fillRecLaneSel() {
     if (l.kind !== 'R' && l.kind !== 'V') return;
     const opt = document.createElement('option');
     opt.value = l.id;
-    opt.textContent = l.name + (l.kind === 'R' ? ' (ghi OSC)' : '');
+    opt.textContent = l.name + (l.groupLabel ? ' · ' + l.groupLabel : (l.kind === 'R' ? ' (ghi OSC)' : ''));
+    opt.title = l.groupLabel || l.name;
     sel.appendChild(opt);
   });
   sel.value = String(state.recLaneId || '');
+  renderRecLaneOrder();
 }
 
 /* Bộ lọc ghi */
@@ -397,6 +448,7 @@ function rebuildFlat() {
   const f = curFolder();
   if (f) f.events.forEach((ev) => flat.push({ t: f.offset + ev.frame, ev, f }));
   flat.sort((a, b) => a.t - b.t);
+  refreshPlaybackSchedule();
 }
 
 function lowerBoundFlat(t) {
@@ -476,6 +528,7 @@ function captureActiveProject() {
   f.audioClips = state.audioClips;
   f.lanes = state.lanes;
   f.recLaneId = state.recLaneId;
+  recSyncLaneGroups(f);
   f.pstate = {
     frame: Math.round(state.frame), viewStart: state.viewStart,
     pps: state.pps, ppsInit: state.ppsInit,
@@ -551,7 +604,7 @@ function switchProject(folderId) {
 /* Cue GỐC (định nghĩa, cố định trong danh sách) + đối tượng ĐẶT trên timeline.
    Kéo cue gốc vào timeline nhiều lần chỉ tạo đối tượng đặt — cue gốc không đổi. */
 function makeDef(address, args) {
-  return { id: nid(), address, args: args || [1], name: '', note: '', color: '', mode: 'trigger' };
+  return { id: nid(), address, args: args || [1], name: '', nameEdited: false, note: '', color: '', colorManual: false, mode: 'trigger' };
 }
 
 function makePlacement(frame, cueId) {
@@ -1182,6 +1235,8 @@ function setFrame(f) {
   }
   // playhead được phép vượt QUÁ điểm cuối timeline (chỉ khoá dưới 0) — không khíng ở 03:00
   state.frame = Math.max(0, f);
+  playbackLastFrame = null;
+  playback.seek(state.frame);
   clockReset(state.frame);          // reset mốc clock: seek/scrub không bao giờ làm audio phát lại
   audioClipId = null;               // lần vào clip kế tiếp sẽ seek đúng 1 lần
   // đang dừng: xem trước âm thanh bám theo clip dưới thanh đò
@@ -1213,24 +1268,19 @@ function play() {
   if ((state.playbackEndMode || 'infinite') === 'contentEndPlus10' && isFinite(pe) && state.frame >= pe) setFrame(0);
   // timeline phát → dừng nghe thử để không phát chồng 2 nguồn
   if (!preview.audio.paused) { preview.audio.pause(); previewSetState(false); }
+  refreshPlaybackSchedule();
+  playback.seek(playbackPosition());
   clockReset(state.frame);     // mốc monotonic tính từ vị trí bắt đầu phát
   audioClipId = null;          // cho phép seek đúng 1 lần khi vào clip
   state.playing = true;
   pushOscMode();
   // nhạc do tick() bật khi playhead đi vào clip — timeline luôn chạy từ vị trí thanh đò
-  if (state.recArmed && state.recMode === 'overwrite') {
-    const f = curFolder();
-    if (f) {
-      const before = f.events.length;
-      f.events = f.events.filter((ev) => (f.offset + ev.frame) < state.frame);
-      if (f.events.length !== before) refreshAll();
-    }
-  }
   updateTransport();
   lanControl('play');
 }
 
 function pause(silent) {
+  playback.stop();
   recFinalizeOpen();
   state.playing = false;
   pushOscMode();
@@ -1245,13 +1295,56 @@ function stop() { pause(true); lanControl('stop'); setFrame(0); }
 function togglePlay() { state.playing ? pause() : play(); }
 
 /* ================= Phát cue ================= */
-function fireDue() {
-  while (state.playbackIdx < flat.length && flat[state.playbackIdx].t <= state.frame) {
-    const x = flat[state.playbackIdx++];
-    if (x.ev.enabled === false) continue;
-    const d = x.f.cues.find((c) => c.id === x.ev.cueId);
-    if (d && d.address) sendOsc(d.address, d.args);
+let playbackKey = null;
+let playbackFps = null;
+let playbackLastFrame = null;
+const playback = new window.HSPlayback.PlaybackScheduler({
+  config: REC_CFG,
+  send: (address, args, target, context) => sendOsc(address, args, target, { ...context, origin: 'playback' })
+});
+
+function playbackPosition() {
+  // A refresh/resume must not replay an already-consumed start at this exact frame.
+  return state.frame === playbackLastFrame
+    ? state.frame + Number.EPSILON * Math.max(1, Math.abs(state.frame)) : state.frame;
+}
+
+function refreshPlaybackSchedule() {
+  const defs = new Map((curFolder()?.cues || []).map((def) => [def.id, def]));
+  const cues = flat.map(({ t, ev }) => {
+    const def = defs.get(ev.cueId) || {};
+    const meta = ev.recMeta || {};
+    const first = (meta.keyframes || []).find((point) => Array.isArray(point.args));
+    const valueIndex = first ? first.args.findIndex((value) => typeof value === 'number' && value === first.value) : -1;
+    return { id: ev.id, frame: t, duration: ev.duration, mode: def.mode,
+      address: def.address, args: def.args, enabled: ev.enabled !== false && def.enabled !== false,
+      pending: !!(ev.recording || ev.pending || meta.pending), unassigned: !!meta.unassigned,
+      keyframes: meta.keyframes, dataOrigin: meta.dataOrigin, curveOrigin: meta.curveOrigin,
+      valueIndex: meta.numericIndex ?? def.valueIndex ?? (valueIndex < 0 ? undefined : valueIndex),
+      interpolation: meta.interpolation || def.interpolation,
+      preserveRecordedEndpoint: meta.captureEndpoint === true && !meta.curveEdited && !meta.trimmed,
+      recordingSpeed: meta.recordingSpeed, outputTarget: def.outputTarget ?? def.target };
+  });
+  const key = JSON.stringify([state.activeFolderId, state.fps,
+    REC_CFG.PLAYBACK_FLOAT_HZ, REC_CFG.PIANO_END_ACTION, cues]);
+  if (key === playbackKey) return;
+  if (playback.generation !== state.activeFolderId) playbackLastFrame = null;
+  Object.assign(playback.config, window.HSRealtime, REC_CFG);
+  const preserved = state.playing && playback.reconcile(cues, { fps: state.fps,
+    generation: state.activeFolderId, fromFrame: state.frame, inclusive: state.frame !== playbackLastFrame });
+  if (!preserved) {
+    playback.load(cues, { fps: state.fps, generation: state.activeFolderId });
+    playback.seek(playbackPosition());
   }
+  playbackKey = key;
+  playbackFps = state.fps;
+}
+
+function fireDue() {
+  if (playbackFps !== state.fps) refreshPlaybackSchedule();
+  const frame = state.frame === playbackLastFrame ? Math.max(state.frame, playback.frame) : state.frame;
+  playback.step(frame, undefined, { playing: state.playing, speed: state.speed });
+  if (state.playing) playbackLastFrame = state.frame;
 }
 
 function nextCue() {
@@ -1263,14 +1356,26 @@ function nextCue() {
   return null;
 }
 
-function sendOsc(address, args) {
-  window.hs.send(address, args, state.target.host, state.target.port)
+function sendOsc(address, args, outputTarget, context) {
+  const targets = typeof oscUI === 'undefined' ? [] : oscUI.targets;
+  let targetIds;
+  if (outputTarget != null) {
+    const selected = Array.isArray(outputTarget) ? outputTarget : [outputTarget];
+    targetIds = targets.filter((target) => target.enabled !== false && selected.some((item) =>
+      (item && typeof item === 'object' ? item.id : item) === target.id)).map((target) => target.id);
+    if (!targetIds.length) return;
+  } else if (targets.length && !targets.some((target) => target.enabled !== false)) return;
+  if (context?.origin === 'playback' && oscPort) {
+    try { oscPort.post({ type: 'recTx', address, args, t: performance.timeOrigin + performance.now() }); } catch (_) {}
+  }
+  window.hs.send(address, args, state.target.host, state.target.port, targetIds)
     .then(() => monRow(address, args, true))
     .catch((e) => setStatus('Gửi OSC lỗi: ' + e.message));
 }
 
 /* ================= Ghi OSC ================= */
 function refreshAll() {
+  recNormalizeLanes();
   syncOscFloatAddresses();
   rebuildFlat();
   refreshVF();
@@ -1319,7 +1424,7 @@ function flushOscRecUi() {
   if (now - oscRecLastStatus > REC_CFG.REC_STATUS_INTERVAL_MS) {   // không spam flashStatus mỗi packet
     oscRecLastStatus = now;
     const f = curFolder();
-    if (f) flashStatus(`Đang ghi OSC → ${f.name} · ${tcString(state.frame, state.fps)}`);
+    if (f) flashStatus(`REC MIDI + OSC → ${f.name} · ${tcString(state.frame, state.fps)}`);
   }
 }
 
@@ -1422,6 +1527,203 @@ function cueResizeMode(x, x1, x2) {
 
 function eventEndFrame(x) {
   return x.t + (x.ev.duration > 0 ? x.ev.duration : autoDur(x.t, x.ev.lane));
+}
+
+function cueCurveSpeed(ev) {
+  const speed = ev.recMeta && ev.recMeta.recordingSpeed;
+  return Number.isFinite(speed) && speed > 0 ? speed : 1;
+}
+
+function cueCurveOptions(ev) {
+  const meta = ev.recMeta || {};
+  return { interpolation: meta.interpolation || 'linear', numericIndex: meta.numericIndex };
+}
+
+function cueCurvePoints(ev, meta = ev.recMeta, duration = ev.duration) {
+  const points = window.HSCurveTools.cloneCueMetadata({ keyframes: (meta && meta.keyframes) || [] }).keyframes;
+  if (!points.length || meta.captureEndpoint !== true || meta.curveEdited || meta.trimmed) return points;
+  const scale = state.fps * cueCurveSpeed(ev) / 1000;
+  const lastFrame = points[points.length - 1].dt * scale;
+  // Match playback's one-frame capture rounding correction; edits never fit curves.
+  if (lastFrame > duration && lastFrame - duration < 1) {
+    const endMs = duration / scale;
+    for (const point of points) point.dt = point.ms = Math.min(point.dt, endMs);
+  }
+  return points;
+}
+
+function trimCueCurve(ev, startFrames, durationFrames, sourceMeta = ev.recMeta, sourceDuration = ev.duration) {
+  if (!sourceMeta || !Array.isArray(sourceMeta.keyframes)) return;
+  ev.recMeta = window.HSCurveTools.cloneCueMetadata(sourceMeta);
+  const framesPerSecond = state.fps * cueCurveSpeed(ev);
+  ev.recMeta.keyframes = window.HSCurveTools.trim(cueCurvePoints(ev, sourceMeta, sourceDuration),
+    Math.max(0, startFrames) * 1000 / framesPerSecond,
+    Math.max(0, startFrames + durationFrames) * 1000 / framesPerSecond, cueCurveOptions(ev));
+  ev.recMeta.keyframesSent = ev.recMeta.keyframes.length;
+  ev.recMeta.captureEndpoint = false;
+}
+
+function cloneCuePlacement(src, frame, folder, copyDefinition = !!src.recMeta) {
+  const cue = { ...structuredClone(src), id: nid(), frame };
+  if (src.recMeta) cue.recMeta = window.HSCurveTools.cloneCueMetadata(src.recMeta);
+  if (copyDefinition) {
+    const original = folder.cues.find((d) => d.id === src.cueId)
+      || state.folders.flatMap((f) => f.cues).find((d) => d.id === src.cueId);
+    if (!original) return null;
+    const def = { ...structuredClone(original), id: nid() };
+    folder.cues.push(def);
+    cue.cueId = def.id;
+  }
+  return cue;
+}
+
+function splitCuePlacement(folder, ev, cutFrame, endFrame) {
+  const start = folder.offset + ev.frame;
+  const right = cloneCuePlacement(ev, cutFrame - folder.offset, folder, false);
+  if (!right) return null;
+  // Splitting keeps the definition shared; the two curve payloads are independent.
+  const meta = ev.recMeta;
+  if (meta && Array.isArray(meta.keyframes)) {
+    const framesPerSecond = state.fps * cueCurveSpeed(ev);
+    const parts = window.HSCurveTools.split(cueCurvePoints(ev, meta, endFrame - start), (cutFrame - start) * 1000 / framesPerSecond,
+      { ...cueCurveOptions(ev), durationMs: (endFrame - start) * 1000 / framesPerSecond });
+    ev.recMeta = window.HSCurveTools.cloneCueMetadata(meta);
+    ev.recMeta.keyframes = parts.left;
+    right.recMeta.keyframes = parts.right;
+    ev.recMeta.keyframesSent = parts.left.length;
+    right.recMeta.keyframesSent = parts.right.length;
+    ev.recMeta.captureEndpoint = right.recMeta.captureEndpoint = false;
+  }
+  ev.duration = cutFrame - start;
+  right.duration = endFrame - cutFrame;
+  insertCue(folder, right);
+  return right;
+}
+
+function resolveCueEditLane(folder, ev) {
+  const def = folder.cues.find((d) => d.id === ev.cueId);
+  const kind = (ev.recMeta && ev.recMeta.kind) || (def && def.mode);
+  if (kind !== 'float' && kind !== 'piano') return;
+  const lanes = folder.id === state.activeFolderId ? state.lanes : folder.lanes;
+  const lane = lanes.find((l) => l.name === ev.lane);
+  if (!lane) return;
+  const collides = (target) => folder.events.some((other) => other !== ev && other.lane === target.name
+    && other.frame < ev.frame + Math.max(1, ev.duration) && other.frame + Math.max(1, other.duration) > ev.frame);
+  if (!collides(lane)) return;
+  let target = lanes.find((l) => l !== lane && l.kind === lane.kind && !l.locked
+    && l.recGroup === lane.recGroup && !collides(l));
+  if (!target) {
+    let n = 1;
+    while (lanes.some((l) => l.name === lane.kind + n)) n++;
+    target = { ...lane, id: nid(), name: lane.kind + n, locked: false,
+      autoRec: true, manual: false, auxiliary: true, auxOf: lane.auxOf || lane.id };
+    lanes.splice(lanes.indexOf(lane) + 1, 0, target);
+  }
+  ev.lane = target.name;
+  ev.laneId = target.id;
+  ev.manualLane = true;
+  folder.lanes = lanes;
+}
+
+function moveCueDrag(drag, x, y) {
+  const lanes = drag.lanes;
+  const row = hitLaneRow(y);
+  const anchor = drag.items.find((item) => item.ev === drag.ev);
+  let delta = Math.round(xToFrame(x) - drag.grabF) - (drag.folder.offset + drag.f0);
+  delta = Math.max(delta, -Math.min(...drag.items.map((item) => item.frame)));
+  let laneDelta = row && !row.isAudio ? lanes.findIndex((l) => l.id === row.id) - anchor.laneIndex : 0;
+  laneDelta = clamp(laneDelta, -Math.min(...drag.items.map((item) => item.laneIndex)),
+    lanes.length - 1 - Math.max(...drag.items.map((item) => item.laneIndex)));
+  if (drag.items.some((item) => lanes[item.laneIndex + laneDelta].locked)) laneDelta = 0;
+  for (const item of drag.items) {
+    item.ev.frame = item.frame + delta;
+    const lane = lanes[item.laneIndex + laneDelta];
+    item.ev.lane = lane.name;
+    item.ev.laneId = lane.id;
+    if (laneDelta) item.ev.manualLane = true;
+    else if (item.manualLane === undefined) delete item.ev.manualLane;
+    else item.ev.manualLane = item.manualLane;
+  }
+}
+
+function drawCueCurve(ev, startFrame, row, left, right) {
+  const meta = ev.recMeta;
+  if (!meta || meta.kind !== 'float' || !Array.isArray(meta.keyframes) || !meta.keyframes.length) return;
+  const points = cueCurvePoints(ev).filter((p) => Number.isFinite(p.value) && Number.isFinite(p.dt ?? p.ms));
+  if (!points.length || right <= left) return;
+  let low = 0, high = 1;
+  for (const point of points) { low = Math.min(low, point.value); high = Math.max(high, point.value); }
+  const top = row.y + 17, height = Math.max(3, row.h - 29);
+  const px = (dt) => frameToX(startFrame + dt * state.fps * cueCurveSpeed(ev) / 1000);
+  const py = (value) => top + (1 - (value - low) / (high - low)) * height;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(left, row.y + 2, right - left, row.h - 10); ctx.clip();
+  ctx.strokeStyle = '#ffffff'; ctx.fillStyle = '#ffffff'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  points.forEach((point, i) => {
+    const dt = point.dt ?? point.ms;
+    if (!i) { ctx.moveTo(px(dt), py(point.value)); return; }
+    const previous = points[i - 1], from = previous.dt ?? previous.ms;
+    if (meta.interpolation === 'step') ctx.lineTo(px(dt), py(previous.value));
+    if (meta.interpolation === 'ease') {
+      for (let j = 1; j < 8; j++) {
+        const t = j / 8, eased = t * t * (3 - 2 * t);
+        ctx.lineTo(px(from + (dt - from) * t), py(previous.value + (point.value - previous.value) * eased));
+      }
+    }
+    ctx.lineTo(px(dt), py(point.value));
+  });
+  ctx.stroke();
+  for (const point of points) {
+    const x = px(point.dt ?? point.ms);
+    if (x < left || x > right) continue;
+    ctx.beginPath(); ctx.arc(x, py(point.value), 2, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawRecPreview(rows, width, height) {
+  for (const [session, live] of recLive) {
+    const tx = recTransactions.get(session);
+    if (!tx || tx.folderId !== state.activeFolderId) continue;
+    const folder = state.folders.find((f) => f.id === tx.folderId);
+    if (!folder) continue;
+    for (const item of live.items.values()) {
+      const group = window.HSCueLayout.laneKeyFor(item, state.laneGroupMode);
+      const lane = state.lanes.find((l) => l.kind === 'R' && !l.locked && l.recGroup === group)
+        || state.lanes.find((l) => l.kind === 'R' && !l.locked && l.id === live.laneId)
+        || state.lanes.find((l) => l.kind === 'R' && !l.locked);
+      const row = lane && rows.find((r) => r.id === lane.id);
+      if (!row || row.y + row.h <= TOP || row.y >= height) continue;
+      const start = folder.offset + Math.max(0, item.startFrame - tx.offset);
+      const x1 = frameToX(start), x2 = frameToX(start + Math.max(1, item.durationFrames));
+      if (x2 < GUT || x1 > width) continue;
+      const left = Math.max(GUT, x1), right = Math.min(width, Math.max(x2, x1 + 3));
+      if (right <= left) continue;
+      const color = !item.address ? '#ffb36b'
+        : item.kind === 'float' ? '#b58aff' : item.kind === 'piano' ? '#55d5ad' : '#70aaff';
+      ctx.save();
+      ctx.beginPath(); ctx.rect(left, row.y + 2, right - left, row.h - 10); ctx.clip();
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.24;
+      ctx.fillRect(left, row.y + 2, right - left, row.h - 10);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = color;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(left + .5, row.y + 2.5, Math.max(1, right - left - 1), row.h - 11);
+      ctx.setLineDash([]);
+      drawCueCurve(item.cue, start, row, left, right);
+      if (right - left > 30) {
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 11px Menlo, monospace';
+        ctx.textBaseline = 'middle';
+        const label = 'REC ' + window.HSCueLayout.resolveCueName(item.address, item);
+        ctx.fillText(label.slice(0, Math.floor((right - left - 8) / 7)), left + 5,
+          item.kind === 'float' ? row.y + 12 : row.y + (row.h - 6) / 2);
+      }
+      ctx.restore();
+    }
+  }
 }
 
 function timelineRows() {
@@ -1538,7 +1840,7 @@ function drawTimeline() {
     ctx.fillText(locked ? '🔒' : '🔓', 10, cy);
     // TÊN lane — cạnh lock, căn trái, màu theo loại: V đỏ · A xanh dương · R vàng
     ctx.font = 'bold 14px -apple-system, sans-serif';
-    ctx.fillStyle = r.isAudio ? '#6fa2ff' : (r.kind === 'R' ? '#ffd24a' : '#ff6b6b');
+    ctx.fillStyle = r.isAudio ? '#6fa2ff' : (r.kind === 'R' ? ((laneObj && laneObj.color) || '#ffd24a') : '#ff6b6b');
     ctx.fillText(r.lane, 33, cy);
     // 🗑 xóa lane — SÁT MÉP PHẢI gutter, mờ đi cho đỡ rối
     ctx.font = '12px -apple-system, sans-serif';
@@ -1639,6 +1941,7 @@ function drawTimeline() {
       : (isSelected ? 0.9 : (isHidden ? 0.30 : 0.85));
     ctx.fillRect(bx, row.y + 2, bw, row.h - 10);
     ctx.globalAlpha = 1;
+    drawCueCurve(x.ev, x.t, row, bx, bx2);
     if (isRec) {
       // cue đang ghi: viền trắng nhấp nháy
       ctx.strokeStyle = 'rgba(255,255,255,.9)';
@@ -1677,14 +1980,26 @@ function drawTimeline() {
       ctx.lineWidth = 1;
     }
     if (bw > 30) {
-      ctx.fillStyle = '#0b0b0e';
+      const color = cueColor(x.ev, x.f);
+      ctx.fillStyle = /^#[\da-f]{6}$/i.test(color) ? window.HSCueLayout.textColor(color) : '#0b0b0e';
       ctx.font = 'bold 12px Menlo, monospace';
       const label = cueLabel(x.ev, x.f);
-      ctx.fillText(label.slice(0, Math.floor(bw / 7.5)), bx + 7, row.y + (row.h - 6) / 2);
+      ctx.fillText(label.slice(0, Math.floor(bw / 7.5)), bx + 7,
+        x.ev.recMeta && x.ev.recMeta.kind === 'float' ? row.y + 13 : row.y + (row.h - 6) / 2);
     }
   });
 
+  drawRecPreview(rows, W, H);
   ctx.restore();   // hết clip vùng lane — thanh đò vẽ đè tự do như cũ
+
+  if (dragInfo && dragInfo.box && dragInfo.end) {
+    ctx.fillStyle = 'rgba(79,140,255,.15)'; ctx.strokeStyle = '#8db5ff';
+    const left = Math.max(GUT, Math.min(dragInfo.x, dragInfo.end.x));
+    const top = Math.max(TOP, Math.min(dragInfo.y, dragInfo.end.y));
+    const width = Math.max(0, Math.max(dragInfo.x, dragInfo.end.x) - left);
+    const height = Math.max(0, Math.max(dragInfo.y, dragInfo.end.y) - top);
+    ctx.fillRect(left, top, width, height); ctx.strokeRect(left, top, width, height);
+  }
 
   // thanh đò
   const px = frameToX(state.frame);
@@ -1881,6 +2196,9 @@ canvas.addEventListener('mousedown', (e) => {
   const r = canvas.getBoundingClientRect();
   const x = e.clientX - r.left, y = e.clientY - r.top;
   mousePos = { x, y };
+  const labelRow = x < GUT ? hitLaneRow(y) : null;
+  const labelLane = labelRow && laneById(labelRow.id);
+  canvas.title = labelLane ? labelLane.name + (labelLane.groupLabel ? ' · ' + labelLane.groupLabel : '') : '';
   // PAN an toàn: chuột GIỮA — pan ngay cả khi trúng cue/clip (không dời dữ liệu)
   if (e.button === 1) {
     dragInfo = { x, y, moved: false, viewStart0: state.viewStart, pan: true };
@@ -1955,10 +2273,12 @@ canvas.addEventListener('mousedown', (e) => {
         flashStatus('Điểm cắt quá sát mép cue — rê vào GIỮA cue để bỏ phần sau.');
         return;
       }
+      noteChange();
+      trimCueCurve(ev, 0, cutF - hit.fx.t);
       ev.duration = cutF - hit.fx.t;
       state.sel = ev; state.selClipId = null; state.multiSel = new Set();
       refreshAll(); renderProps(); updateSelBar(); scheduleAutosave();
-      flashStatus(`✂ Đã bỏ phần sau từ ${tcString(cutF, state.fps)} — cue còn đến đây (kéo mép phải để lấy lại).`);
+      flashStatus(`✂ Đã bỏ phần sau từ ${tcString(cutF, state.fps)} — curve đã trim, không stretch.`);
       return;
     }
     flashStatus('Cắt nhanh: rê chuột vào cue/clip (thấy dòng đỏ xem trước) rồi click để bỏ phần phía sau.');
@@ -2007,15 +2327,10 @@ canvas.addEventListener('mousedown', (e) => {
         flashStatus('Vết cắt quá sát mép cue — không có gì để chia.');
       } else {
         // chia cue thành 2 placement ĐỘC LẬP nhưng cùng cueId (source OSC của cue gốc)
-        const ev1 = ev, ev2 = makePlacement(cutF - f.offset, ev.cueId);
-        ev2.lane = ev.lane;
-        ev2.duration = endF - cutF;
-        ev1.duration = cutF - hit.fx.t;
-        ev2.enabled = ev.enabled !== false;
-        ev2.smpteInput = !!ev.smpteInput;
-        insertCue(f, ev2);
+        noteChange();
+        splitCuePlacement(f, ev, cutF, endF);
         refreshAll(); scheduleAutosave();
-        flashStatus(`Đã chia cue tại ${tcString(cutF, state.fps)} — 2 đoạn dùng cùng cue gốc (kéo mép để khôi phục phần đã cắt).`);
+        flashStatus(`Đã chia cue tại ${tcString(cutF, state.fps)} — 2 đoạn dùng cùng cue gốc, curve độc lập.`);
       }
       return;
     }
@@ -2040,20 +2355,29 @@ canvas.addEventListener('mousedown', (e) => {
     const x2 = frameToX(eventEndFrame(hit.fx));
     let mode = cueResizeMode(x, x1, x2) || 'move';
     if (locked) mode = 'move'; // lane khóa: chỉ click chọn, không dời/đổi độ dài
+    const selected = mode === 'move' && selSet().has(hit.fx.ev) ? [...selSet()] : [hit.fx.ev];
+    const lanes = state.lanes.filter((lane) => lane.kind !== 'A');
     blockDrag = {
       ev: hit.fx.ev, folder: f, mode, mouse: { x, y }, moved: false,
-      copy: e.altKey,                  // Alt = đặt thêm 1 điểm mới (cùng cue gốc)
-      locked,
+      copy: e.altKey || e.ctrlKey,
+      locked: locked || selected.some((ev) => laneLockedByName(ev.lane)),
+      lanes,
+      items: selected.map((ev) => ({ ev, folder: findCueLoc(ev).f, frame: ev.frame,
+        lane: ev.lane, laneId: ev.laneId, laneIndex: lanes.findIndex((l) => l.name === ev.lane),
+        manualLane: ev.manualLane })),
+      meta0: hit.fx.ev.recMeta && window.HSCurveTools.cloneCueMetadata(hit.fx.ev.recMeta),
       f0: hit.fx.t - f.offset,
       dur0: hit.fx.ev.duration || 0,
       grabF: xToFrame(x) - hit.fx.t,
       end0: eventEndFrame(hit.fx),
-      lane0: hit.fx.ev.lane
+      lane0: hit.fx.ev.lane,
+      manualLane0: !!hit.fx.ev.manualLane
     };
     canvas.style.cursor = (mode === 'move' && !locked) ? 'grabbing' : (locked ? 'default' : 'ew-resize');
     return;
   }
-  dragInfo = { x, y, moved: false, viewStart0: state.viewStart };
+  dragInfo = { x, y, moved: false, viewStart0: state.viewStart, box: e.shiftKey && y >= TOP,
+    selection: new Set(selSet()) };
 });
 canvas.addEventListener('mousemove', (e) => {
   const r = canvas.getBoundingClientRect();
@@ -2104,21 +2428,23 @@ canvas.addEventListener('mousemove', (e) => {
   }
   if (blockDrag) {
     if (blockDrag.locked) return; // lane khóa — không kéo
-    if (!blockDrag.moved && (Math.abs(x - blockDrag.mouse.x) > 2 || Math.abs(y - blockDrag.mouse.y) > 2)) blockDrag.moved = true;
+    if (!blockDrag.moved && (Math.abs(x - blockDrag.mouse.x) > 2 || Math.abs(y - blockDrag.mouse.y) > 2)) {
+      noteChange();
+      blockDrag.moved = true;
+    }
     if (blockDrag.moved) {
       // CẬP NHẬT NGAY khi kéo — mượt như edit video
       const ev = blockDrag.ev;
-      const entry = flat.find((p) => p.ev === ev);
       if (blockDrag.mode === 'move') {
-        ev.frame = Math.max(0, Math.round(xToFrame(x) - blockDrag.grabF) - blockDrag.folder.offset);
-        const row = hitLaneRow(y);
-        if (row && !row.isAudio && row.lane !== ev.lane && !laneLockedByName(row.lane)) ev.lane = row.lane;
+        moveCueDrag(blockDrag, x, y);
       } else if (blockDrag.mode === 'resize-r') {
-        ev.duration = Math.max(1, Math.round(xToFrame(x)) - (entry ? entry.t : 0));
+        ev.duration = Math.max(1, Math.round(xToFrame(x)) - (blockDrag.folder.offset + blockDrag.f0));
+        trimCueCurve(ev, 0, ev.duration, blockDrag.meta0, blockDrag.end0 - blockDrag.folder.offset - blockDrag.f0);
       } else { // resize-l
-        const newStart = Math.round(xToFrame(x));
-        ev.duration = Math.max(1, blockDrag.end0 - Math.min(newStart, blockDrag.end0 - 1));
-        ev.frame = Math.max(0, newStart - blockDrag.folder.offset);
+        const newStart = clamp(Math.round(xToFrame(x)), blockDrag.folder.offset + (blockDrag.meta0 ? blockDrag.f0 : 0), blockDrag.end0 - 1);
+        ev.duration = blockDrag.end0 - newStart;
+        ev.frame = newStart - blockDrag.folder.offset;
+        trimCueCurve(ev, ev.frame - blockDrag.f0, ev.duration, blockDrag.meta0, blockDrag.end0 - blockDrag.folder.offset - blockDrag.f0);
       }
       rebuildFlat();
     }
@@ -2170,7 +2496,21 @@ canvas.addEventListener('mousemove', (e) => {
     setFrame(Math.max(0, Math.round(xToFrame(x))));
     return;
   }
-  if (Math.abs(x - dragInfo.x) > 4) dragInfo.moved = true;
+  if (Math.abs(x - dragInfo.x) > 4 || Math.abs(y - dragInfo.y) > 4) dragInfo.moved = true;
+  if (dragInfo.box && dragInfo.moved) {
+    dragInfo.end = { x, y };
+    const left = Math.min(dragInfo.x, x), right = Math.max(dragInfo.x, x);
+    const top = Math.min(dragInfo.y, y), bottom = Math.max(dragInfo.y, y);
+    state.multiSel = new Set(dragInfo.selection);
+    for (const fx of refreshVF()) {
+      const row = timelineRows().find((r) => r.lane === fx.ev.lane);
+      if (row && row.y < bottom && row.y + row.h > top
+        && frameToX(fx.t) < right && frameToX(eventEndFrame(fx)) > left) state.multiSel.add(fx.ev);
+    }
+    state.sel = [...state.multiSel].slice(-1)[0] || null;
+    updateSelBar();
+    return;
+  }
   if (dragInfo.moved) {
     state.viewStart = Math.max(0, dragInfo.viewStart0 - (x - dragInfo.x) / state.pps);
   }
@@ -2208,24 +2548,31 @@ window.addEventListener('mouseup', (e) => {
     if (blockDrag.moved && blockDrag.folder && !blockDrag.locked) {
       const f = blockDrag.folder;
       if (blockDrag.copy && blockDrag.mode === 'move') {
-        // Alt = đặt thêm 1 ĐIỂM ĐẶT mới (cùng cue gốc) — cue gốc trở về chỗ cũ
-        const dup = makePlacement(Math.max(0, ev.frame), ev.cueId);
-        dup.lane = ev.lane; dup.duration = ev.duration || 0; dup.enabled = ev.enabled !== false;
-        insertCue(f, dup);
-        ev.frame = blockDrag.f0;
-        ev.lane = blockDrag.lane0;
-        ev.duration = blockDrag.dur0 || 0;
-        state.sel = dup;
-        state.multiSel = new Set([dup]);
-        refreshAll();
-        renderProps();
-        flashStatus(`Đã đặt thêm 1 điểm tại ${tcString(f.offset + dup.frame, state.fps)} trên ${dup.lane}`);
+        const copies = blockDrag.items.map((item) => ({ item,
+          cue: cloneCuePlacement(item.ev, item.ev.frame, item.folder) }));
+        for (const { item } of copies) {
+          Object.assign(item.ev, { frame: item.frame, lane: item.lane });
+          if (item.laneId === undefined) delete item.ev.laneId; else item.ev.laneId = item.laneId;
+          if (item.manualLane === undefined) delete item.ev.manualLane; else item.ev.manualLane = item.manualLane;
+        }
+        const selected = copies.filter(({ cue }) => cue);
+        for (const { item, cue } of selected) {
+          insertCue(item.folder, cue);
+          resolveCueEditLane(item.folder, cue);
+        }
+        state.multiSel = new Set(selected.map(({ cue }) => cue));
+        state.sel = selected.length ? selected[selected.length - 1].cue : ev;
+        refreshAll(); renderProps();
+        flashStatus(`Đã sao chép ${selected.length} cue.`);
       } else {
-        const i = f.events.indexOf(ev);
-        if (i >= 0) f.events.splice(i, 1);
-        insertCue(f, ev); // sắp lại thứ tự trong thư mục
+        for (const item of blockDrag.items) {
+          const i = item.folder.events.indexOf(item.ev);
+          if (i >= 0) item.folder.events.splice(i, 1);
+          insertCue(item.folder, item.ev);
+          resolveCueEditLane(item.folder, item.ev);
+        }
         state.sel = ev;
-        state.multiSel = new Set([ev]);
+        state.multiSel = new Set(blockDrag.items.map((item) => item.ev));
         refreshAll();
         renderProps();
         flashStatus(blockDrag.mode === 'move'
@@ -2236,7 +2583,7 @@ window.addEventListener('mouseup', (e) => {
       // click chọn cue (⌘/Ctrl = thêm/bỏ khỏi vùng chọn)
       state.selAudioLaneId = null;
       state.selClipId = null;   // chọn cue = bỏ chọn instance clip (selbar không hiện nhầm)
-      if (e.metaKey || e.ctrlKey) {
+      if (e.metaKey || e.ctrlKey || e.shiftKey) {
         if (state.multiSel.has(ev)) state.multiSel.delete(ev);
         else state.multiSel.add(ev);
         state.sel = [...state.multiSel].slice(-1)[0] || null;
@@ -2257,6 +2604,9 @@ window.addEventListener('mouseup', (e) => {
   const r = canvas.getBoundingClientRect();
   const x = e.clientX - r.left, y = e.clientY - r.top;
   if (dragInfo.mode === 'scrub') { dragInfo = null; return; }
+  if (dragInfo.box && dragInfo.moved) {
+    dragInfo = null; renderFolders(); renderProps(); updateSelBar(); return;
+  }
   if (!dragInfo.moved && x >= GUT) {
     const row = hitLaneRow(y);
     if (row && row.isAudio) {
@@ -2462,7 +2812,7 @@ canvas.addEventListener('drop', (e) => {
       const cue = makePlacement(0, def.id);
       cue.duration = 3 * state.fps;
       cue.frame = Math.max(0, Math.round(xToFrame(x)) - f.offset);
-      if (row && !row.isAudio) cue.lane = row.lane;
+      if (row && !row.isAudio) { cue.lane = row.lane; cue.manualLane = true; }
       insertCue(f, cue);
       state.sel = cue;
       state.multiSel = new Set([cue]);
@@ -2749,10 +3099,10 @@ function updateTransport() {
   const chipRec = $('chipRec');
   if (chipRec) {
     chipRec.classList.toggle('armed', state.recArmed);
-    const recCount = MIDI.notes.size + MIDI.cc.size;
-    chipRec.textContent = state.recArmed
-      ? (recCount ? `● ĐANG GHI ${recCount}` : '● REC BẬT')
-      : '● REC TẮT';
+    chipRec.textContent = recTransactions.size && recActiveSession === null ? 'REC: chốt phiên'
+      : recTransactions.get(recActiveSession)?.accepted === false ? 'REC: chờ xác nhận'
+      : recActiveSession !== null ? 'REC: đang ghi / chờ kết quả'
+      : state.recArmed ? 'REC: chờ Play' : '● REC TẮT';
   }
 }
 
@@ -3166,7 +3516,6 @@ $('btnStop').addEventListener('click', stop);
 $('btnHome').addEventListener('click', () => setFrame(0));
 $('btnLoop').addEventListener('click', () => { state.loop = !state.loop; updateTransport(); });
 $('btnFollow').addEventListener('click', toggleFollow);
-let recSnap = null;   // snapshot trước khi REC — tắt ghi là cả phiên thành MỘT bước hoàn tác
 function toggleRec() {
   if (recTransactions.size && recActiveSession === null) {
     setStatus('REC đang chốt phiên, chưa thể đổi REC.');
@@ -3228,7 +3577,7 @@ $('chipBounce').addEventListener('click', () => {
   const cb = $('mrBounce');
   if (cb) cb.checked = state.midiBounce;
   updateRecChips();
-  flashStatus(state.midiBounce ? 'Bấm pad = bắn OSC ngay (kể cả khi không ghi).' : 'Bấm pad KHÔNG bắn OSC khi không ghi.');
+  flashStatus(state.midiBounce ? 'Bounce gửi mapping thật khi không ghi; trong REC, MIDI phải nối trực tiếp tới Resolume.' : 'Bấm pad KHÔNG bắn OSC khi không ghi.');
   scheduleAutosave();
 });
 $('chipSmpte').addEventListener('click', () => {
@@ -3254,7 +3603,10 @@ function updateRecChips() {
     chipPad.classList.toggle('on', state.recNoteMode !== 'auto');
   }
   const chipBounce = $('chipBounce');
-  if (chipBounce) chipBounce.classList.toggle('on', !!state.midiBounce);
+  if (chipBounce) {
+    chipBounce.classList.toggle('on', !!state.midiBounce);
+    chipBounce.title = 'Bounce chỉ gửi khi không có phiên REC hoạt động. Trong REC, MIDI phải được map trực tiếp trong Resolume để tránh phản hồi OSC trùng.';
+  }
   const chipSmpte = $('chipSmpte');
   if (chipSmpte) chipSmpte.classList.toggle('on', !!state.recSmpteInput);
   const chipRecMode = $('chipRecMode');
@@ -3273,6 +3625,7 @@ function updateMidiChip() {
 }
 // «Hết phát» / «Tự chuyển bài» / «Theo thanh đò» đã bỏ UI theo thiết kế mới — giữ giá trị mặc định/trong dự án
 $('speedSel').addEventListener('change', (e) => {
+  if (recActiveSession !== null) pause(true);
   // đổi tốc độ: neo lại clock tại vị trí hiện tại để không nhảy thời gian
   state.frame = oscTimelineFrame(performance.now());
   clockReset(state.frame);
@@ -3281,6 +3634,7 @@ $('speedSel').addEventListener('change', (e) => {
   if (mode() === 'audio') audio.playbackRate = state.speed;
 });
 $('fpsSel').addEventListener('change', (e) => {
+  if (recActiveSession !== null) pause(true);
   state.frame = oscTimelineFrame(performance.now());
   clockReset(state.frame);
   state.fps = parseInt(e.target.value, 10) || 30;
@@ -3357,7 +3711,11 @@ function copySelection() {
   }
   const set = selSet();
   if (!set.size) { setStatus('Chưa chọn cue nào.'); return false; }
-  const items = [...set].map((ev) => JSON.parse(JSON.stringify(ev)));
+  const items = [...set].map((ev) => {
+    const loc = findCueLoc(ev);
+    return { ...structuredClone(ev), frame: ev.frame + (loc ? loc.f.offset : 0),
+      clipboardDefinition: structuredClone(defOf(ev)) };
+  });
   items.sort((a, b) => a.frame - b.frame);
   state.clipboardMulti = items;
   state.clipboard = items[0]; // tương thích Dán đơn
@@ -3377,6 +3735,7 @@ function cutSelection() {
     flashStatus('Đã cắt clip nhạc — Dán sẽ tạo INSTANCE MỚI tại playhead.');
     return;
   }
+  if ([...selSet()].some((ev) => laneLockedByName(ev.lane))) { setStatus('Locked cues cannot be cut.'); return; }
   if (!copySelection()) return;
   deleteSelection(false);
   flashStatus(`Đã cắt — nhấn Dán để đặt tại thanh đò.`);
@@ -3396,6 +3755,8 @@ function deleteSelection(notify = true) {
   }
   const set = selSet();
   if (!set.size) return;
+  if ([...set].some((ev) => laneLockedByName(ev.lane))) { setStatus('Locked cues cannot be deleted.'); return; }
+  noteChange();
   set.forEach((ev) => {
     const loc = findCueLoc(ev);
     if (loc) loc.f.events.splice(loc.i, 1);
@@ -3435,27 +3796,32 @@ function pasteSelection(atFrame) {
   if (!items || !items.length) { setStatus('Chưa có cue nào trong bộ nhớ.'); return; }
   let f = curFolder();
   if (!f) f = addFolder();
-  const base = Math.floor(atFrame !== undefined ? atFrame : state.frame) - f.offset;
+  if (!state.lanes.some((l) => l.kind !== 'A' && !l.locked)) { setStatus('No unlocked cue lane.'); return; }
+  const base = Math.max(0, Math.round(atFrame !== undefined ? atFrame : state.frame) - f.offset);
   const base0 = items[0].frame;
   const newSel = new Set();
+  noteChange();
   items.forEach((src) => {
     // dán = điểm đặt mới, dùng lại cue gốc (cueId) đã có trong thư mục đích nếu trùng nguồn
     let defId = src.cueId;
-    if (!f.cues.some((c) => c.id === defId)) {
+    if (src.recMeta || !f.cues.some((c) => c.id === defId)) {
       // cue gốc ở thư mục khác → tạo bản def tương ứng trong thư mục đích
       const srcF = state.folders.find((fo) => fo.cues.some((c) => c.id === src.cueId));
-      const sd = srcF && srcF.cues.find((c) => c.id === src.cueId);
+      const sd = src.clipboardDefinition || (srcF && srcF.cues.find((c) => c.id === src.cueId));
       if (!sd) return;
-      const nd = findOrMakeDef(f, sd.address, sd.args);
-      nd.name = sd.name; nd.color = sd.color; nd.note = sd.note; nd.mode = sd.mode;
+      const nd = { ...structuredClone(sd), id: nid() };
+      f.cues.push(nd);
       defId = nd.id;
     }
-    const cue = makePlacement(Math.max(0, base + (src.frame - base0)), defId);
-    cue.lane = src.lane || cue.lane;
-    cue.duration = src.duration || 0;
-    cue.enabled = src.enabled !== false;
-    if (!laneByName(cue.lane)) cue.lane = state.lanes[0].name;
+    const cue = cloneCuePlacement(src, Math.max(0, base + (src.frame - base0)), f, false);
+    cue.cueId = defId;
+    delete cue.clipboardDefinition;
+    let lane = laneByName(cue.lane);
+    if (!lane || lane.locked || lane.kind === 'A') lane = state.lanes.find((l) => l.kind !== 'A' && !l.locked);
+    if (!lane) return;
+    cue.lane = lane.name; cue.laneId = lane.id;
     insertCue(f, cue);
+    resolveCueEditLane(f, cue);
     newSel.add(cue);
   });
   state.multiSel = newSel;
@@ -3506,12 +3872,16 @@ $('btnSelNone').addEventListener('click', deselectAll);
 function nudgeSelected(df) {
   const set = selSet();
   if (!set.size) return;
+  if ([...set].some((ev) => laneLockedByName(ev.lane))) return;
+  const delta = Math.max(df, -Math.min(...[...set].map((ev) => ev.frame)));
+  noteChange();
   set.forEach((ev) => {
     const loc = findCueLoc(ev);
     if (!loc) return;
     loc.f.events.splice(loc.i, 1);
-    ev.frame = Math.max(0, ev.frame + df);
+    ev.frame += delta;
     insertCue(loc.f, ev);
+    resolveCueEditLane(loc.f, ev);
   });
   refreshAll();
 }
@@ -3760,8 +4130,27 @@ function handleOscProcMessage(m, sourcePort = oscPort) {
   if (!m || !m.type) return;
   if (sourcePort && oscPort && sourcePort !== oscPort) return;
   switch (m.type) {
+    case 'recordStarted': {
+      const tx = recTransactions.get(m.session);
+      if (!tx || tx.accepted) break;
+      tx.accepted = true;
+      if (tx.overwrite) {
+        const f = state.folders.find((folder) => folder.id === tx.folderId);
+        if (f) {
+          f.events = f.events.filter((cue) => tx.offset + cue.frame < tx.anchorFrame);
+          refreshAll();
+        }
+      }
+      updateTransport();
+      break;
+    }
+    case 'recordPreview':
+      try { recReceivePreview(m); }
+      finally { if (sourcePort) sourcePort.post({ type: 'previewAck' }); }
+      break;
     case 'recordActions':
-      recReceiveActions(m);
+      try { recReceiveActions(m); }
+      finally { if (sourcePort) sourcePort.post({ type: 'recordAck', batchId: m.batchId }); }
       break;
     case 'recordDrained': {
       const tx = recTransactions.get(m.session);
@@ -3769,13 +4158,20 @@ function handleOscProcMessage(m, sourcePort = oscPort) {
       break;
     }
     case 'recordMapping': {
-      if (!recTransactions.has(m.session) || !m.mapping || !m.mapping.address || m.mapping.guessed || m.mapping.unassigned) break;
-      midiMap.set(m.key, structuredClone(m.mapping));
-      syncOscFloatAddresses();
+      recReceiveMapping(m.session, m.key, m.mapping);
       break;
     }
-    case 'recordWarning':
-      if (recTransactions.has(m.session)) setStatus('REC: ' + m.text);
+    case 'recordWarning': {
+      const tx = recTransactions.get(m.session);
+      if (tx && m.text) {
+        tx.warnings.add(String(m.text));
+        clearTimeout(statusTimer);
+        setStatus('REC: ' + [...tx.warnings].join(' '));
+      }
+      break;
+    }
+    case 'recordRejected':
+      if (recTransactions.has(m.session)) recInterrupt('Utility từ chối REC: ' + (m.text || 'không thể mở phiên'));
       break;
     case 'uiBatch': {
       // Latest values are feedback only: never record or learn from this stream.
@@ -3821,13 +4217,14 @@ function handleOscProcMessage(m, sourcePort = oscPort) {
     case 'error':
       oscProcError = m.error || null;
       if (m.fatal) {
-        recInterrupt('Tiến trình OSC lỗi');
         window.__oscListening = false;
+        recInterrupt('Tiến trình OSC lỗi');
         setStatus('OSC lỗi: ' + oscProcError);
       }
       updateOscMetrics();
       break;
     case 'restarting':
+      window.__oscListening = false;
       for (const resolve of midiMatchWaiters.values()) resolve(null);
       midiMatchWaiters.clear();
       recInterrupt('Tiến trình OSC khởi động lại');
@@ -3838,8 +4235,8 @@ function handleOscProcMessage(m, sourcePort = oscPort) {
       updateOscMetrics();
       break;
     case 'closed':
-      recInterrupt('OSC đã đóng');
       window.__oscListening = false;
+      recInterrupt('OSC đã đóng');
       updateOscMetrics();
       break;
     default:
@@ -3852,6 +4249,10 @@ function recStartTransaction() {
     setStatus('REC chưa thể bắt đầu: đang chốt phiên hoặc chưa có kết nối OSC.');
     return false;
   }
+  if (window.__oscListening !== true) {
+    setStatus('REC chưa thể bắt đầu: OSC chưa sẵn sàng lắng nghe. Bật OSC rồi bấm Play để thử lại.');
+    return false;
+  }
   const f = curFolder();
   const lane = recLane();
   if (!f || (lane && lane.locked)) {
@@ -3862,23 +4263,33 @@ function recStartTransaction() {
   const tx = { session: ++oscSession, folderId: f.id, offset: f.offset,
     fps: state.fps, speed: state.speed, anchorEpoch: performance.timeOrigin + now,
     anchorFrame: oscTimelineFrame(now), smpteInput: !!state.recSmpteInput,
-    recSnap: snapshot(), cutoff: null, timer: null, actions: new Set() };
+    recSnap: snapshot(), cutoff: null, timer: null, actions: new Set(),
+    accepted: false, overwrite: state.recMode === 'overwrite', warnings: new Set() };
   oscAnchor = { epoch: tx.anchorEpoch, frame: tx.anchorFrame, session: tx.session };
   recTransactions.set(tx.session, tx);
+  recLive.set(tx.session, { laneId: lane && lane.kind === 'R' ? lane.id : null, items: new Map() });
   recActiveSession = tx.session;
-  recSnap = tx.recSnap;
   const mappings = new Map(midiMap);
   for (const [key, address] of MIDI.padMap) {
     if (address && !mappings.has(key)) mappings.set(key, { address, kind: 'trigger', args: [1] });
   }
+  // Persisted projects may have device-independent mappings from earlier versions.
+  if (state.midiDeviceId) {
+    for (const [key, mapping] of [...mappings]) {
+      const deviceKey = state.midiDeviceId + '|' + key;
+      if (!key.includes('|') && !mappings.has(deviceKey)) mappings.set(deviceKey, mapping);
+    }
+  }
   try {
     oscPort.post({ type: 'recStart', session: tx.session, fps: tx.fps,
       anchorEpoch: tx.anchorEpoch, anchorFrame: tx.anchorFrame, speed: tx.speed,
-      mappings: [...mappings], smpteInput: tx.smpteInput });
+      mappings: [...mappings], smpteInput: tx.smpteInput,
+      config: { USE_LEARNED_MAPPING_FALLBACK: !!state.useLearnedMappingFallback } });
   } catch (_) {
     recInterrupt('Không gửi được lệnh bắt đầu REC');
     return false;
   }
+  if (!recTransactions.has(tx.session) || recActiveSession !== tx.session) return false;
   return true;
 }
 
@@ -3887,20 +4298,25 @@ function recStopTransaction() {
   if (!tx || tx.cutoff !== null) return;
   tx.cutoff = performance.timeOrigin + performance.now();
   recActiveSession = null;
+  const heldCount = MIDI.notes.size;
   MIDI.notes.clear();
   MIDI.cc.clear();
   tx.timer = setTimeout(() => {
     if (recTransactions.has(tx.session)) {
+      try { oscPort.post({ type: 'recAbort', session: tx.session }); }
+      catch (_) { recInterrupt('Không gửi được lệnh hủy phiên REC'); return; }
       recFinishTransaction(tx, 'Hết thời gian chốt REC; giữ phần đã nhận, dữ liệu chưa nhận có thể bị mất.');
     }
   }, REC_CFG.REC_DRAIN_TIMEOUT_MS);
   try { oscPort.post({ type: 'recStop', session: tx.session, cutoff: tx.cutoff }); }
-  catch (_) { recFinishTransaction(tx, 'Kết nối REC gián đoạn; chỉ giữ phần đã nhận.'); }
+  catch (_) { recInterrupt('Kết nối REC gián đoạn'); }
   updateTransport();
+  if (heldCount) setStatus('REC đang chốt phiên; note còn giữ được đóng tại thời điểm dừng.');
 }
 
 function recFinishTransaction(tx, warning) {
   if (!recTransactions.has(tx.session)) return;
+  recLive.delete(tx.session);
   clearTimeout(tx.timer);
   if (recActiveSession === tx.session) recActiveSession = null;
   // Flush while suppression is still active, then commit exactly one history entry.
@@ -3908,44 +4324,101 @@ function recFinishTransaction(tx, warning) {
   refreshAll();
   const after = snapshot();
   recTransactions.delete(tx.session);
-  recSnap = null;
   if (after !== tx.recSnap) {
     undoStack.push(tx.recSnap);
-    if (undoStack.length > 60) undoStack.shift();
+    if (undoStack.length > REC_CFG.REC_HISTORY_LIMIT) undoStack.shift();
     redoStack.length = 0;
   }
   lastSnap = after;
   updateTransport();
   renderProps();
   scheduleAutosave();
-  setStatus(warning || 'REC đã chốt phiên; hoàn tác cả phiên bằng Cmd+Z.');
+  if (warning) tx.warnings.add(warning);
+  clearTimeout(statusTimer);
+  setStatus(tx.warnings.size ? 'REC: ' + [...tx.warnings].join(' ')
+    : 'REC đã chốt phiên; hoàn tác cả phiên bằng Cmd+Z.');
 }
 
 function recInterrupt(reason) {
+  recLive.clear();
   if (!recTransactions.size) return;
   state.recArmed = false;
   oscRecording = false;
+  oscRecArmed = false;
+  try { if (window.hs.oscMode) window.hs.oscMode({ type: 'recording', on: false, session: oscSession }); } catch (_) {}
   MIDI.notes.clear();
   MIDI.cc.clear();
+  const port = oscPort;
   for (const tx of [...recTransactions.values()]) {
+    try { if (port) port.post({ type: 'recAbort', session: tx.session }); } catch (_) {}
     recFinishTransaction(tx, reason + ': giữ cue đã nhận; phần chưa nhận có thể mất, không tự khôi phục thời gian ghi.');
   }
   for (const resolve of midiMatchWaiters.values()) resolve(null);
   midiMatchWaiters.clear();
 }
 
+function recReceivePreview(message) {
+  const tx = recTransactions.get(message.session);
+  const live = recLive.get(message.session);
+  if (!tx || !live || !Array.isArray(message.items)
+    || !state.folders.some((folder) => folder.id === tx.folderId)) return;
+  const items = new Map();
+  for (const item of message.items.slice(0, REC_CFG.REC_PREVIEW_MAX_ITEMS)) {
+    if (!item || (typeof item.id !== 'string' && !Number.isFinite(item.id))
+      || (typeof item.id === 'string' && (!item.id.length || item.id.length > 128))
+      || tx.actions.has(item.id) || !['trigger', 'piano', 'float'].includes(item.kind)
+      || !Number.isFinite(item.startFrame) || item.startFrame < 0
+      || !Number.isFinite(item.durationFrames) || item.durationFrames < 0) continue;
+    const keyframes = [];
+    const points = Array.isArray(item.keyframes) ? item.keyframes : [];
+    const count = Math.min(points.length, REC_CFG.REC_PREVIEW_MAX_POINTS);
+    for (let i = 0; i < count; i++) {
+      const point = points[count === 1 ? 0 : Math.round(i * (points.length - 1) / (count - 1))];
+      const dt = point && (point.dt ?? point.ms);
+      if (Number.isFinite(dt) && dt >= 0 && Number.isFinite(point.value)) {
+        keyframes.push({ dt, ms: dt, value: point.value });
+      }
+    }
+    const preview = { id: item.id, kind: item.kind, source: item.source === 'osc' ? 'osc' : 'midi',
+      num: Number.isInteger(item.num) && item.num >= 0 && item.num <= 127 ? item.num : undefined,
+      ch: Number.isInteger(item.ch) && item.ch >= 1 && item.ch <= 16 ? item.ch : 1,
+      device: typeof item.device === 'string' ? item.device.slice(0, 256) : '',
+      address: typeof item.address === 'string' && item.address.startsWith('/') ? item.address.slice(0, 1024) : '',
+      startFrame: item.startFrame, durationFrames: item.durationFrames,
+      cue: { duration: item.durationFrames, recMeta: { kind: item.kind, recordingSpeed: tx.speed, keyframes } } };
+    items.set(item.id, preview);
+  }
+  live.items = items;
+}
+
+function recReceiveMapping(session, key, mapping) {
+  const tx = recTransactions.get(session);
+  if (!tx || !tx.accepted || typeof key !== 'string' || !mapping || !mapping.address || mapping.guessed || mapping.unassigned) return;
+  midiMap.set(key, structuredClone(mapping));
+  syncOscFloatAddresses();
+}
+
 function recReceiveActions(message) {
   const tx = recTransactions.get(message.session);
-  if (!tx || !Array.isArray(message.items)) return;
+  if (!tx || !tx.accepted) return;
+  for (const entry of Array.isArray(message.mappings) ? message.mappings : []) {
+    if (Array.isArray(entry) && entry.length === 2) recReceiveMapping(message.session, entry[0], entry[1]);
+  }
+  if (!Array.isArray(message.items)) return;
   const f = state.folders.find((folder) => folder.id === tx.folderId);
   if (!f) { setStatus('REC: bài nhận đã bị xóa, không thể đặt cue.'); return; }
   for (const descriptor of message.items) {
+    const live = recLive.get(message.session);
+    if (live && descriptor) {
+      live.items.delete(descriptor.id);
+      live.items.delete(descriptor.actionId);
+    }
     if (!descriptor || !['trigger', 'piano', 'float'].includes(descriptor.kind) ||
       !Number.isFinite(descriptor.startFrame) ||
       (descriptor.session !== undefined && descriptor.session !== tx.session)) continue;
     if (descriptor.actionId != null && tx.actions.has(descriptor.actionId)) continue;
     const desc = { ...descriptor, startFrame: descriptor.startFrame - tx.offset + f.offset,
-      smpteInput: tx.smpteInput };
+      smpteInput: tx.smpteInput, recordingSpeed: tx.speed };
     const cue = recCreateLiveCue(f, desc);
     recFinalizeCue(f, cue, desc);
     if (descriptor.actionId != null) tx.actions.add(descriptor.actionId);
@@ -3957,8 +4430,14 @@ function recReceiveActions(message) {
 
 /* recStart/recStop share the ordered port; main mode IPC is only discovery state. */
 function pushOscMode(reanchor = false) {
+  if (reanchor && recActiveSession !== null) {
+    pause(true);
+    setStatus('REC đã dừng để đổi mốc; chờ chốt phiên rồi bấm Play để ghi tiếp.');
+  }
   if (recActiveSession !== null && (!state.recArmed || !state.playing || reanchor)) recStopTransaction();
-  if (state.recArmed && state.playing && recActiveSession === null && !recTransactions.size) recStartTransaction();
+  if (state.recArmed && state.playing && recActiveSession === null && !recTransactions.size && !recStartTransaction()) {
+    pause(true);
+  }
   const on = recActiveSession !== null;
   if (on !== oscRecording || state.recArmed !== oscRecArmed) {
     if (!on) oscSession++;
@@ -4009,6 +4488,7 @@ function oscProcMidiEnd(id, endTs) {
 }
 window.hs.onStatus((s) => {
   window.__oscListening = !!s.listening;   // mini bridge đọc cờ này khi broadcast
+  if (!s.listening) recInterrupt('OSC chưa lắng nghe');
   const el = $('oscStatus');
   const tgl = $('btnOscToggle');
   tgl.classList.toggle('armed', !!s.listening);
@@ -4151,6 +4631,7 @@ function renderOscTargets() {
     em.textContent = 'Chưa có địa chỉ OSC — bấm "＋ Thêm".';
     box.appendChild(em);
   }
+  mountCueOutputSelector(state.sel);
 }
 
 async function saveOscTargets() {
@@ -4406,6 +4887,7 @@ function openTestOsc() {
 }
 
 function closeTestOsc() {
+  oscAssignCue = null;
   $('testOscModal').style.display = 'none';
   oscFeed.testVisible = false; // ẩn = không tích lũy/không render thêm
   oscCaptureSeen = false;
@@ -4813,7 +5295,12 @@ function renderTestOscRows() {
     const ty = document.createElement('span'); ty.className = 'typ'; ty.textContent = oscTypeLabel(m.type);
     const v = document.createElement('span'); v.className = 'args'; v.textContent = (m.args || []).join(', ');
     div.append(t, a, ty, v);
-    div.addEventListener('click', () => cueFromOsc(m.address, m.args));
+    div.addEventListener('click', () => {
+      if (oscAssignCue) {
+        recAssignOsc(oscAssignCue, m.address, m.args);
+        closeTestOsc();
+      } else cueFromOsc(m.address, m.args);
+    });
     box.appendChild(div);
   });
   $('toCount').textContent = `${TEST_OSC.rows.length} gói`;
@@ -4960,6 +5447,150 @@ $('toFilterType').addEventListener('change', (e) => { TEST_OSC.type = e.target.v
   $('btnSongSearch').addEventListener('click', () => toggleSearch('songSearch', 'btnSongSearch'));
 })();
 
+function mountCueOutputSelector(ev) {
+  let row = $('pOscTargetRow');
+  if (!ev) { if (row) row.hidden = true; return; }
+  const folder = state.folders.find((item) => item.events.includes(ev));
+  const def = folder && folder.cues.find((item) => item.id === ev.cueId);
+  if (!def || !$('propsBody')) return;
+  if (!row) {
+    row = document.createElement('label');
+    row.id = 'pOscTargetRow';
+    row.className = 'row';
+    const label = document.createElement('span');
+    label.textContent = 'OSC Out';
+    const select = document.createElement('select');
+    select.id = 'pOscTarget';
+    row.append(label, select);
+    $('propsBody').appendChild(row);
+  }
+  row.hidden = false;
+  const select = $('pOscTarget');
+  select.innerHTML = '';
+  const targets = typeof oscUI !== 'undefined' ? oscUI.targets : [];
+  const selected = def.outputTarget == null ? null : Array.isArray(def.outputTarget) ? def.outputTarget : [def.outputTarget];
+  function option(value, text) {
+    const item = document.createElement('option');
+    item.value = value;
+    item.textContent = text;
+    select.appendChild(item);
+  }
+  option('', 'Tất cả OSC Out');
+  for (const target of targets) option(JSON.stringify([target.id]),
+    (target.name || target.id) + (target.enabled === false ? ' (đang tắt)' : ''));
+  if (selected && (selected.length !== 1 || !targets.some((target) => target.id === selected[0]))) {
+    option(JSON.stringify(selected), selected.length === 1 ? selected[0] + ' (không khả dụng)' :
+      selected.length ? selected.join(', ') + ' (nhóm OSC Out)' : 'Không gửi OSC');
+  }
+  select.value = selected ? JSON.stringify(selected) : '';
+  const lane = (folder.lanes || []).find((item) => ev.laneId != null ? item.id === ev.laneId : item.name === ev.lane);
+  select.disabled = !!(lane && lane.locked);
+  select.onchange = () => {
+    if (select.disabled || state.sel !== ev || !folder.events.includes(ev)) return;
+    noteChange();
+    if (!select.value) delete def.outputTarget;
+    else {
+      const ids = JSON.parse(select.value);
+      def.outputTarget = ids.length === 1 ? ids[0] : ids;
+    }
+    rebuildFlat();
+    noteChange();
+    scheduleAutosave();
+  };
+}
+
+function recMoveLaneById(id, toIdOrDelta) {
+  const folder = curFolder();
+  if (!folder) return false;
+  const lanes = state.lanes.filter((lane) => lane.kind === 'R');
+  const from = lanes.findIndex((lane) => String(lane.id) === String(id));
+  const to = typeof toIdOrDelta === 'number' ? from + toIdOrDelta
+    : lanes.findIndex((lane) => String(lane.id) === String(toIdOrDelta));
+  if (from < 0 || to < 0 || to >= lanes.length || from === to
+    || lanes.slice(Math.min(from, to), Math.max(from, to) + 1).some((lane) => lane.locked)) return false;
+  noteChange();
+  const [moving] = lanes.splice(from, 1);
+  lanes.splice(to, 0, moving);
+  let index = 0;
+  state.lanes.splice(0, state.lanes.length, ...state.lanes.map((lane) => lane.kind === 'R' ? lanes[index++] : lane));
+  folder.lanes = state.lanes;
+  recNormalizeLanes(folder, false);
+  refreshAll();
+  noteChange();
+  scheduleAutosave();
+  return true;
+}
+
+function renderRecLaneOrder() {
+  const anchor = $('recLaneSel');
+  if (!anchor || !anchor.parentElement) return;
+  let panel = $('recLaneOrder');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'recLaneOrder';
+    panel.setAttribute('role', 'group');
+    panel.setAttribute('aria-label', 'Thứ tự hàng REC');
+    anchor.parentElement.parentElement.appendChild(panel);
+  }
+  panel.innerHTML = '';
+  const lanes = state.lanes.filter((lane) => lane.kind === 'R');
+  panel.hidden = lanes.length < 2;
+  for (const [index, lane] of lanes.entries()) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const handle = document.createElement('button');
+    handle.type = 'button';
+    handle.textContent = lane.name + (lane.groupLabel ? ' · ' + lane.groupLabel : '');
+    handle.title = 'Kéo để đổi thứ tự; dùng phím mũi tên lên/xuống';
+    handle.draggable = !lane.locked;
+    handle.disabled = !!lane.locked;
+    handle.addEventListener('dragstart', (event) => {
+      panel.dataset.dragLane = String(lane.id);
+      if (event.dataTransfer) { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', String(lane.id)); }
+    });
+    handle.addEventListener('dragend', () => { delete panel.dataset.dragLane; });
+    handle.addEventListener('keydown', (event) => {
+      if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+      event.preventDefault(); event.stopPropagation();
+      if (recMoveLaneById(lane.id, event.key === 'ArrowUp' ? -1 : 1)) {
+        const next = document.querySelector('#recLaneOrder [data-lane-id="' + lane.id + '"]');
+        if (next) next.focus();
+      }
+    });
+    handle.dataset.laneId = String(lane.id);
+    row.addEventListener('dragover', (event) => { if (!lane.locked && panel.dataset.dragLane) event.preventDefault(); });
+    row.addEventListener('drop', (event) => {
+      event.preventDefault(); event.stopPropagation();
+      const from = panel.dataset.dragLane;
+      delete panel.dataset.dragLane;
+      if (from) recMoveLaneById(from, String(lane.id));
+    });
+    row.appendChild(handle);
+    for (const [delta, label] of [[-1, 'Lên'], [1, 'Xuống']]) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.textContent = label;
+      const adjacent = lanes[index + delta];
+      button.disabled = !!lane.locked || !adjacent || !!adjacent.locked;
+      button.setAttribute('aria-label', lane.name + ' ' + label);
+      button.addEventListener('click', () => recMoveLaneById(lane.id, delta));
+      row.appendChild(button);
+    }
+    panel.appendChild(row);
+  }
+}
+
+if ($('pianoEndAction')) {
+  $('pianoEndAction').value = REC_CFG.PIANO_END_ACTION;
+  $('pianoEndAction').addEventListener('change', (event) => {
+    if (!['connect0', 'layerclear'].includes(event.target.value)) return;
+    noteChange();
+    REC_CFG.PIANO_END_ACTION = event.target.value;
+    rebuildFlat();
+    noteChange();
+    scheduleAutosave();
+  });
+}
+
 function switchCueTab(cueTab) {
   $('tabCue').classList.toggle('is-active', cueTab);
   $('tabMusic').classList.toggle('is-active', !cueTab);
@@ -5027,8 +5658,61 @@ function selDef() {
   return f.cues.find((c) => c.id === state.sel.cueId) || null;
 }
 
+let propsCurveEditor = null;
+let propsCurveCancel = null;
+
+function mountPropsCurve(ev, def, locked) {
+  let container = $('curveEditor');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'curveEditor';
+    $('propsBody').appendChild(container);
+  }
+  const meta = ev && ev.recMeta;
+  container.hidden = !meta || meta.kind !== 'float' || !window.HSCurveEditor;
+  if (container.hidden) return;
+  container.style.pointerEvents = locked ? 'none' : '';
+  container.style.opacity = locked ? '.5' : '';
+  container.inert = locked;
+  const points = cueCurvePoints(ev);
+  if (Number.isInteger(meta.numericIndex)) points.forEach((point) => { point.numericIndex = meta.numericIndex; });
+  let before = null, initial = null;
+  propsCurveCancel = () => {
+    if (before) ev.recMeta = before;
+    before = null;
+  };
+  propsCurveEditor = window.HSCurveEditor.mount(container, {
+    points, durationMs: Math.max(0, ev.duration || 0) * 1000 / (state.fps * cueCurveSpeed(ev)),
+    interpolation: meta.interpolation || 'linear', fps: state.fps * cueCurveSpeed(ev),
+    onChange(nextPoints, options) {
+      if (locked || !findCueLoc(ev)) return;
+      if (before && !options.commit && initial && options.interpolation === initial.interpolation
+        && JSON.stringify(nextPoints) === JSON.stringify(initial.points)) {
+        ev.recMeta = before; before = null; renderRecMeta(ev); return;
+      }
+      if (!before) { before = structuredClone(ev.recMeta); noteChange(); }
+      ev.recMeta = { ...ev.recMeta, keyframes: window.HSCurveTools.cloneCueMetadata({ keyframes: nextPoints }).keyframes,
+        interpolation: options.interpolation, keyframesSent: nextPoints.length, captureEndpoint: false };
+      renderRecMeta(ev);
+      if (!options.commit) return;
+      const original = before;
+      before = null;
+      initial = { points: structuredClone(nextPoints), interpolation: options.interpolation };
+      if (JSON.stringify(original) === JSON.stringify(ev.recMeta)) return;
+      rebuildFlat();
+      noteChange();
+      scheduleAutosave();
+    }
+  });
+  initial = propsCurveEditor.getState();
+}
+
 function renderProps() {
+  if (propsCurveEditor) { propsCurveEditor.destroy(); propsCurveEditor = null; }
+  if (propsCurveCancel) { propsCurveCancel(); propsCurveCancel = null; }
+  if ($('curveEditor')) $('curveEditor').hidden = true;
   const ev = state.sel;
+  mountCueOutputSelector(ev);
   $('propsEmptyHint').style.display = ev ? 'none' : '';
   $('propsBody').style.display = ev ? '' : 'none';
   if (!ev) return;
@@ -5049,6 +5733,7 @@ function renderProps() {
   });
   renderSwatches();
   renderRecMeta(ev);
+  mountPropsCurve(ev, d, !!(laneObj && laneObj.locked));
 }
 
 /* Thông tin AUTO-REC của cue: nguồn MIDI, OSC khớp, độ trễ, keyframe Float */
@@ -5059,12 +5744,11 @@ function renderRecMeta(ev) {
   if (!m) { box.hidden = true; return; }
   box.hidden = false;
   const kind = { trigger: 'Trigger', piano: 'Piano', float: 'Float' }[m.kind] || m.kind;
-  const src = m.kind === 'float' ? `CC ${m.num}` : `MIDI ${m.num}`;
-  const status = m.matched
-    ? (m.guessed ? 'gán từ mapping (suy đoán)' : `Resolume báo về · lệch ${m.latencyMs != null ? m.latencyMs : 0}ms`)
-    : 'Chưa gán OSC';
+  const src = m.source === 'osc' ? 'OSC' : m.kind === 'float' ? `CC ${m.num}` : `MIDI ${m.num}`;
+  const status = m.unassigned ? 'Chưa gán OSC' : m.guessed ? 'gán từ mapping (suy đoán)'
+    : m.matched ? `Resolume báo về · lệch ${m.latencyMs != null ? m.latencyMs : 0}ms` : 'Đã gán thủ công';
   const kf = m.kind === 'float'
-    ? `<span>Keyframe: <b>${m.keyframesSent}/${m.keyframesRaw}</b> điểm (đã tối giản)</span>`
+    ? `<span>Keyframe: <b>${(m.keyframes || []).length}/${m.keyframesRaw || 0}</b> điểm${m.dataOrigin === 'midi' ? ' · MIDI display only' : ''}</span>`
     : '';
   const extras = (m.extras || []).length
     ? `<span>Ngõ vào phụ: <b>${m.extras.map((e) => e.address).join(', ')}</b></span>`
@@ -5074,6 +5758,32 @@ function renderRecMeta(ev) {
     <span>${kind} · ${src} · ch${m.ch}${m.vel != null ? ' · vel ' + m.vel : ''}</span>
     <span>Giữ: <b>${(m.holdMs / 1000).toFixed(2)}s</b></span>
     ${kf}${extras}`;
+  if (m.unassigned) {
+    const choose = document.createElement('button');
+    choose.textContent = 'Chọn từ OSC';
+    choose.addEventListener('click', () => { openTestOsc(); oscAssignCue = ev; });
+    box.appendChild(choose);
+  }
+}
+
+function recAssignOsc(cue, address, args) {
+  const f = state.folders.find((folder) => folder.events.includes(cue));
+  const def = f && f.cues.find((item) => item.id === cue.cueId);
+  if (!def || !address || !address.startsWith('/')) return;
+  def.address = address;
+  if (Array.isArray(args)) def.args = structuredClone(args);
+  if (cue.recMeta) {
+    Object.assign(cue.recMeta, { unassigned: false, guessed: false, matched: false, mappingStatus: 'manual' });
+    if (cue.recMeta.num != null && cue.recMeta.source !== 'osc') {
+      midiMap.set(recMapKey(cue.recMeta), { address, kind: cue.recMeta.kind, args: structuredClone(def.args) });
+    }
+  }
+  if (!def.nameEdited) def.name = recCueName(cue.recMeta || {}, address);
+  recLayoutCue(f, cue, { ...(cue.recMeta || {}), address, kind: def.mode,
+    startFrame: cue.frame, durationFrames: cue.duration }, true);
+  recNormalizeLanes(f);
+  refreshAll();
+  renderProps();
 }
 
 function renderSwatches() {
@@ -5088,6 +5798,7 @@ function renderSwatches() {
     b.title = c;
     b.addEventListener('click', () => {
       d.color = d.color === c ? '' : c;
+      d.colorManual = true;
       renderProps();
       renderFolders();
       scheduleAutosave();
@@ -5099,7 +5810,7 @@ function renderSwatches() {
 /* TÊN / ĐỊA CHỈ / THAM SỐ / GHI CHÚ / MÀU / CHẾ ĐỘ sửa trên CUE GỐC — chỉ đổi thuộc tính, không sinh cue mới */
 $('pName').addEventListener('input', (e) => {
   const d = selDef();
-  if (d) { d.name = e.target.value; renderFolders(); scheduleAutosave(); }
+  if (d) { d.name = e.target.value; d.nameEdited = true; renderFolders(); scheduleAutosave(); }
 });
 $('pTime').addEventListener('change', () => {
   const f = findSelectedFolder();
@@ -5107,10 +5818,12 @@ $('pTime').addEventListener('change', () => {
   if (state.sel && v !== null && f) {
     const laneObj = laneByName(state.sel.lane);
     if (laneObj && laneObj.locked) { flashStatus(`Lane ${state.sel.lane} đang khóa.`); renderProps(); return; }
+    noteChange();
     const i = f.events.indexOf(state.sel);
     f.events.splice(i, 1);
-    state.sel.frame = v - f.offset;
+    state.sel.frame = Math.max(0, v - f.offset);
     insertCue(f, state.sel);
+    resolveCueEditLane(f, state.sel);
     refreshAll();
   }
 });
@@ -5120,9 +5833,17 @@ $('pDur').addEventListener('change', () => {
   if (state.sel) {
     const laneObj = laneByName(state.sel.lane);
     if (laneObj && laneObj.locked) { flashStatus(`Lane ${state.sel.lane} đang khóa.`); renderProps(); return; }
-    state.sel.duration = v === null || v <= 0 ? 0 : v;
+    noteChange();
+    const duration = v === null || v <= 0 ? (state.sel.recMeta && state.sel.recMeta.kind === 'float' ? 1 : 0) : v;
+    trimCueCurve(state.sel, 0, duration);
+    state.sel.duration = duration;
+    const folder = findSelectedFolder();
+    if (folder) resolveCueEditLane(folder, state.sel);
+    rebuildFlat();
     infoDirty = true;
+    noteChange();
     scheduleAutosave();
+    renderProps();
   }
 });
 $('pDur').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
@@ -5131,9 +5852,7 @@ $('pAddr').addEventListener('change', () => {
   const v = $('pAddr').value.trim();
   if (!d) return;
   if (v.startsWith('/')) {
-    d.address = v; // chỉ sửa thuộc tính — điểm đặt trên timeline giữ nguyên vị trí
-    renderFolders();
-    scheduleAutosave();
+    recAssignOsc(state.sel, v, d.args);
   } else {
     flashStatus('Địa chỉ OSC phải bắt đầu bằng "/" — ví dụ /composition/layers/4/clips/1/connect');
     renderProps(); // trả về địa chỉ cũ
@@ -5144,6 +5863,7 @@ $('pArgs').addEventListener('change', () => {
   if (!d) return;
   d.args = $('pArgs').value.split(',').map((s) => s.trim()).filter((s) => s !== '')
     .map((s) => (!isNaN(Number(s)) ? Number(s) : s));
+  rebuildFlat();
   scheduleAutosave();
 });
 $('pHideBtn').addEventListener('click', () => {
@@ -5157,14 +5877,17 @@ $('pHideBtn').addEventListener('click', () => {
 ['Trigger', 'Piano', 'Float'].forEach((m) => {
   $('pMode' + m).addEventListener('click', () => {
     const d = selDef();
-    if (d) { d.mode = m.toLowerCase(); renderProps(); scheduleAutosave(); }
+    if (d) { d.mode = m.toLowerCase(); rebuildFlat(); renderProps(); scheduleAutosave(); }
   });
 });
 $('pPlayNow').addEventListener('click', () => {
   const d = selDef();
   if (!d) return;
+  if (state.sel && state.sel.recMeta && (state.sel.recMeta.unassigned || state.sel.recMeta.dataOrigin === 'midi')) {
+    setStatus('Cue is display-only until actual OSC data is assigned.'); return;
+  }
   if (!d.address) { setStatus('Cue chưa có địa chỉ OSC — điền ĐỊA CHỈ OSC ở trên trước.'); return; }
-  sendOsc(d.address, d.args);
+  sendOsc(d.address, d.args, d.outputTarget);
   flashStatus(`Đã gửi ngay: ${d.address}`);
 });
 $('propsHead').addEventListener('click', (e) => {
@@ -5237,30 +5960,42 @@ const undoStack = [], redoStack = [];
 let lastSnap = null;
 
 function snapshot() {
-  captureActiveProject();
-  return JSON.stringify({ folders: state.folders, lanes: state.lanes, audioClips: state.audioClips,
-    midiMap: [...midiMap], laneGroups: laneAlloc.exportGroups() });
+  return JSON.stringify(projectEncode({ folders: state.folders, lanes: state.lanes, audioClips: state.audioClips,
+    activeFolderId: state.activeFolderId, recLaneId: state.recLaneId,
+    midiMap: [...midiMap], laneGroups: laneAlloc.exportGroups(), laneGroupMode: state.laneGroupMode,
+    useLearnedMappingFallback: state.useLearnedMappingFallback,
+    pianoEndAction: REC_CFG.PIANO_END_ACTION }));
 }
 
 let restoringHistory = false;
 function applySnapshot(snap) {
   restoringHistory = true;
   try {
-  const d = JSON.parse(snap);
-  state.folders = d.folders;
-  state.lanes = d.lanes;
-  state.audioClips = Array.isArray(d.audioClips) ? d.audioClips : [];   // undo cả cut/trim/dời instance
-  midiMap.clear();
-  for (const [key, mapping] of d.midiMap || []) midiMap.set(key, mapping);
-  laneAlloc.importGroups(d.laneGroups || {});
-  const f = curFolder();
-  if (f) { f.lanes = state.lanes; f.audioClips = state.audioClips; }
-  state.sel = null;
-  state.selClipId = null;
-  state.multiSel = new Set();
-  refreshAll();
-  renderProps();
-  updateSelBar();
+    const d = projectDecode(JSON.parse(snap));
+    state.folders = d.folders;
+    if (d.activeFolderId != null) state.activeFolderId = d.activeFolderId;
+    state.recLaneId = d.recLaneId == null ? null : d.recLaneId;
+    state.useLearnedMappingFallback = typeof d.useLearnedMappingFallback === 'boolean'
+      ? d.useLearnedMappingFallback : !!REC_CFG.USE_LEARNED_MAPPING_FALLBACK;
+    if ($('learnedMappingFallback')) $('learnedMappingFallback').checked = state.useLearnedMappingFallback;
+    state.laneGroupMode = ['layer+type', 'address'].includes(d.laneGroupMode) ? d.laneGroupMode : window.HSRealtime.LANE_GROUP_MODE;
+    if ($('laneGroupMode')) $('laneGroupMode').value = state.laneGroupMode;
+    REC_CFG.PIANO_END_ACTION = ['connect0', 'layerclear'].includes(d.pianoEndAction) ? d.pianoEndAction : window.HSRealtime.PIANO_END_ACTION;
+    if ($('pianoEndAction')) $('pianoEndAction').value = REC_CFG.PIANO_END_ACTION;
+    state.lanes = d.lanes;
+    state.audioClips = Array.isArray(d.audioClips) ? d.audioClips : [];
+    midiMap.clear();
+    for (const [key, mapping] of d.midiMap || []) midiMap.set(key, mapping);
+    MIDI.padMap.clear();
+    laneAlloc.importGroups(d.laneGroups || {});
+    const f = curFolder();
+    if (f) { f.lanes = state.lanes; f.audioClips = state.audioClips; f.recLaneId = state.recLaneId; recNormalizeLanes(f, false); }
+    state.sel = null;
+    state.selClipId = null;
+    state.multiSel = new Set();
+    refreshAll();
+    renderProps();
+    updateSelBar();
   } finally { restoringHistory = false; }
 }
 
@@ -5272,7 +6007,7 @@ function noteChange() {
   if (snap === lastSnap) return;
   if (lastSnap) {
     undoStack.push(lastSnap);
-    if (undoStack.length > 60) undoStack.shift();
+    if (undoStack.length > REC_CFG.REC_HISTORY_LIMIT) undoStack.shift();
     redoStack.length = 0;
   }
   lastSnap = snap;
@@ -5305,6 +6040,7 @@ function scheduleAutosave() {
   clearTimeout(autosaveTimer);
   if (recTransactions.size) return;
   autosaveTimer = setTimeout(() => {
+    if (recTransactions.size) return;
     try {
       localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(serializeProject()));
       if (typeof lanPushProject === 'function') lanPushProject();
@@ -5314,8 +6050,8 @@ function scheduleAutosave() {
 
 function serializeProject() {
   captureActiveProject();   // dữ liệu đang làm việc phải nằm về ĐÚNG bài đang mở trước khi ghi đĩa
-  return {
-    version: 12,
+  return projectEncode({
+    version: 13,
     fps: state.fps,
     // v11: bảng học MIDI→OSC + nhóm lane auto-rec (giữ qua lần mở sau)
     midiMap: Object.fromEntries(midiMap),
@@ -5362,7 +6098,11 @@ function serializeProject() {
         mute: !!c.mute
       })),
       // TRACKS: riêng từng bài
-      lanes: (f.lanes || []).map((l) => ({ id: l.id, name: l.name, kind: l.kind, locked: !!l.locked })),
+      lanes: (f.lanes || []).map((l) => ({ id: l.id, name: l.name, kind: l.kind, locked: !!l.locked,
+        recGroup: l.recGroup || null, groupLabel: l.groupLabel || '', color: l.color || '',
+        colorManual: !!l.colorManual, autoRec: !!l.autoRec, manual: !!l.manual, manualLane: !!l.manualLane,
+        auxiliary: !!l.auxiliary, auxOf: l.auxOf == null ? null : l.auxOf })),
+      laneGroups: f.laneGroups || {},
       recLaneId: f.recLaneId || null,
       pstate: f.pstate || null       // playback settings riêng của bài này
     })),
@@ -5372,9 +6112,53 @@ function serializeProject() {
       targetPort: state.target.port,
       filterPreset: state.filterPreset,
       filterRegex: state.filterRegex,
-      recMode: state.recMode
+      recMode: state.recMode,
+      laneGroupMode: state.laneGroupMode,
+      useLearnedMappingFallback: state.useLearnedMappingFallback,
+      pianoEndAction: REC_CFG.PIANO_END_ACTION
     }
-  };
+  });
+}
+
+// Project transport stays JSON; only OSC byte values need an explicit wire type.
+function projectEncode(value) {
+  if (value instanceof Uint8Array) return { __hsOscBytes: Array.from(value) };
+  if (Array.isArray(value)) return value.map(projectEncode);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, projectEncode(item)]));
+  return value;
+}
+
+function projectDecode(value) {
+  if (value instanceof Uint8Array) return new Uint8Array(value);
+  if (Array.isArray(value)) return value.map(projectDecode);
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value);
+    if (keys.length === 1 && keys[0] === '__hsOscBytes' && Array.isArray(value.__hsOscBytes)
+      && value.__hsOscBytes.length <= REC_CFG.OSC_EVENT_QUEUE_BYTES
+      && value.__hsOscBytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+      return Uint8Array.from(value.__hsOscBytes);
+    }
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, projectDecode(item)]));
+  }
+  return value;
+}
+
+function projectOscArgs(args, fallback = []) {
+  if (!Array.isArray(args)) return structuredClone(fallback);
+  let remaining = REC_CFG.OSC_EVENT_QUEUE_BYTES;
+  function valid(value, depth) {
+    if (--remaining < 0 || depth > REC_CFG.OSC_MAX_BUNDLE_DEPTH) return false;
+    if (value == null || typeof value === 'boolean') return true;
+    if (typeof value === 'number') return Number.isFinite(value);
+    if (typeof value === 'string') { remaining -= value.length; return remaining >= 0; }
+    if (value instanceof Uint8Array) { remaining -= value.byteLength; return remaining >= 0; }
+    if (Array.isArray(value)) return value.every((item) => valid(item, depth + 1));
+    if (value && typeof value === 'object') return Object.entries(value).every(([key, item]) =>
+      !['__proto__', 'constructor', 'prototype', '__hsOscBytes'].includes(key) && valid(item, depth + 1));
+    return false;
+  }
+  const decoded = projectDecode(args);
+  return valid(decoded, 0) ? decoded : structuredClone(fallback);
 }
 
 function migrateFolder(f, legacy, library, idMap) {
@@ -5396,12 +6180,16 @@ function migrateFolder(f, legacy, library, idMap) {
     nf.cues = f.cues.filter((c) => c && typeof c === 'object').map((c) => ({
       id: c.id || nid(),
       address: c.address == null ? '' : String(c.address),
-      args: Array.isArray(c.args) ? c.args : [1],
+      args: projectOscArgs(c.args, [1]),
       name: c.name == null ? '' : String(c.name),
       nameEdited: !!c.nameEdited,
       note: c.note == null ? '' : String(c.note),
       color: c.color == null ? '' : String(c.color),
-      mode: c.mode || 'trigger'
+      colorManual: c.colorManual == null ? !!c.color : !!c.colorManual,
+      mode: c.mode || 'trigger',
+      ...(typeof c.outputTarget === 'string' ? { outputTarget: c.outputTarget } :
+        Array.isArray(c.outputTarget) && c.outputTarget.every((id) => typeof id === 'string')
+          ? { outputTarget: c.outputTarget.slice() } : {})
     }));
     const ids = new Set(nf.cues.map((c) => c.id));
     nf.events = (Array.isArray(f.events) ? f.events : [])
@@ -5412,6 +6200,8 @@ function migrateFolder(f, legacy, library, idMap) {
           lane: e.lane || 'V1', duration: e.duration || 0, enabled: e.enabled !== false,
           smpteInput: !!e.smpteInput
         };
+        if (e.manualLane) event.manualLane = true;
+        if (e.laneId != null) event.laneId = e.laneId;
         if (typeof e.recGroup === 'string') event.recGroup = e.recGroup;
         const meta = e.recMeta;
         if (meta && ['trigger', 'piano', 'float'].includes(meta.kind)) {
@@ -5419,19 +6209,38 @@ function migrateFolder(f, legacy, library, idMap) {
           for (const key of ['num', 'ch', 'vel', 'holdMs', 'score', 'latencyMs', 'keyframesRaw', 'keyframesSent', 'session', 'startMs', 'endMs']) {
             if (Number.isFinite(meta[key])) event.recMeta[key] = meta[key];
           }
+          if (Number.isFinite(meta.recordingSpeed) && meta.recordingSpeed > 0) event.recMeta.recordingSpeed = meta.recordingSpeed;
+          if (Number.isSafeInteger(meta.numericIndex) && meta.numericIndex >= 0) event.recMeta.numericIndex = meta.numericIndex;
+          if (['linear', 'step', 'ease', 'ease-in', 'ease-out', 'ease-in-out'].includes(meta.interpolation)) event.recMeta.interpolation = meta.interpolation;
           for (const key of ['matched', 'guessed', 'unassigned']) event.recMeta[key] = !!meta[key];
-          for (const key of ['source', 'mappingStatus', 'device', 'actionId']) {
+          for (const key of ['captureEndpoint', 'curveEdited', 'trimmed']) {
+            if (typeof meta[key] === 'boolean') event.recMeta[key] = meta[key];
+          }
+          if (typeof meta.manualLane === 'boolean') event.recMeta.manualLane = meta.manualLane;
+          for (const key of ['source', 'dataOrigin', 'mappingStatus', 'device']) {
             if (typeof meta[key] === 'string') event.recMeta[key] = meta[key];
           }
+          if (typeof meta.actionId === 'string' || Number.isFinite(meta.actionId)) event.recMeta.actionId = meta.actionId;
           event.recMeta.keyframes = (Array.isArray(meta.keyframes) ? meta.keyframes : [])
-            .filter((point) => point && Number.isFinite(point.dt) && point.dt >= 0 && Number.isFinite(point.value))
-            .map((point) => ({ dt: point.dt, value: point.value }));
+            .filter((point) => point && Number.isFinite(point.dt ?? point.ms) && (point.dt ?? point.ms) >= 0 && Number.isFinite(point.value))
+            .filter((point, index, points) => index < REC_CFG.FLOAT_MAX_POINTS - 1 || index === points.length - 1)
+            .map((point) => {
+              const saved = { dt: point.dt ?? point.ms, value: point.value };
+              for (const key of ['ms', 't', 'tFrame', 'seq']) if (Number.isFinite(point[key])) saved[key] = point[key];
+              if (Number.isSafeInteger(point.numericIndex) && point.numericIndex >= 0) saved.numericIndex = point.numericIndex;
+              if (Array.isArray(point.args)) saved.args = projectOscArgs(point.args);
+              return saved;
+            });
           event.recMeta.extras = (Array.isArray(meta.extras) ? meta.extras : [])
             .filter((extra) => extra && typeof extra.address === 'string')
+            .slice(0, REC_CFG.OSC_MAX_ADDRESSES)
             .map((extra) => ({ address: extra.address,
-              args: Array.isArray(extra.args) ? structuredClone(extra.args) : [],
+              args: projectOscArgs(extra.args),
               ...(Number.isFinite(extra.count) ? { count: extra.count } : {}),
-              ...(Number.isFinite(extra.dtMs) ? { dtMs: extra.dtMs } : {}) }));
+              ...(Number.isFinite(extra.dtMs) ? { dtMs: extra.dtMs } : {}),
+              ...(Number.isFinite(extra.t) ? { t: extra.t } : {}),
+              ...(Number.isFinite(extra.seq) ? { seq: extra.seq } : {}),
+              ...(typeof extra.release === 'boolean' ? { release: extra.release } : {}) }));
         }
         return event;
       });
@@ -5455,13 +6264,18 @@ function migrateFolder(f, legacy, library, idMap) {
   if (f.songs || f.audioClips || f.lanes) {
     // v9/v10: folder tự mang instance + lane — clip đối chiếu source vào THƯ VIỆN CHUNG
     nf.lanes = (f.lanes || []).filter((l) => l && l.name).map((l) => ({
-      id: l.id || nid(), name: l.name, kind: l.kind || l.name[0], locked: !!l.locked
+      id: l.id || nid(), name: l.name, kind: l.kind || l.name[0], locked: !!l.locked,
+      recGroup: typeof l.recGroup === 'string' ? l.recGroup : null,
+      groupLabel: typeof l.groupLabel === 'string' ? l.groupLabel : '',
+      color: typeof l.color === 'string' ? l.color : '', colorManual: !!l.colorManual,
+      autoRec: l.autoRec === true, manual: !!l.manual, manualLane: !!l.manualLane,
+      auxiliary: !!l.auxiliary, auxOf: l.auxOf == null ? null : l.auxOf
     }));
     if (!nf.lanes.length) nf.lanes = [];   // activateProject sẽ dựng bộ lane mặc định
     nf.audioClips = migrateAudioClips({ audioClips: f.audioClips || [] }, library, nf.lanes.length ? nf.lanes : [{ id: 1, kind: 'A' }], idMap);
     nf.recLaneId = f.recLaneId || null;
     nf.pstate = f.pstate || null;
-  } else if (legacy && legacy.isOwnFolder) {
+  } else if (legacy && legacy.isOwnFolder && Array.isArray(legacy.lanes)) {
     // v≤8: dữ liệu audio global cũ → gắn về ĐÚNG MỘT bài (bài active khi lưu) — không trộn 2 bài
     nf.lanes = legacy.lanes;
     nf.audioClips = legacy.audioClips;
@@ -5471,6 +6285,21 @@ function migrateFolder(f, legacy, library, idMap) {
     // bài khác của dự án cũ: hoàn toàn TRỐNG — không được thừa hưởng dữ liệu của bài khác
     Object.assign(nf, freshProjectData());
   }
+  const groups = f.laneGroups || (legacy && legacy.isOwnFolder && legacy.laneGroups) || {};
+  for (const lane of nf.lanes) {
+    if (!lane.recGroup) {
+      const oldGroup = Object.keys(groups).find((key) => Array.isArray(groups[key]) && groups[key].includes(lane.name));
+      if (oldGroup) {
+        const event = nf.events.find((item) => item.lane === lane.name);
+        const def = event && nf.cues.find((item) => item.id === event.cueId);
+        const descriptor = { ...(event && event.recMeta), address: def && def.address, kind: def && def.mode };
+        lane.recGroup = event ? window.HSCueLayout.laneKeyFor(descriptor, state.laneGroupMode) : oldGroup;
+        lane.groupLabel = event ? window.HSCueLayout.labelFor(descriptor, state.laneGroupMode) : '';
+        lane.autoRec = true;
+      }
+    }
+  }
+  recSyncLaneGroups(nf);
   return nf;
 }
 
@@ -5511,13 +6340,14 @@ function migrateAudioClips(data, songs, lanes, idMap) {
 }
 
 function applyProject(data) {
-  if (!data || ![3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(data.version)) { setStatus('File dự án không hợp lệ.'); return; }
+  if (!data || ![3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].includes(data.version)) { setStatus('File dự án không hợp lệ.'); return; }
   if (recTransactions.size || state.recArmed) { setStatus('Tắt REC và chờ chốt phiên trước khi mở dự án.'); return; }
+  data = projectDecode(data);
   // v11: khôi phục bảng học MIDI→OSC + nhóm lane (v10 trở xuống: rỗng)
   midiMap.clear();
   if (data.midiMap && typeof data.midiMap === 'object') {
     for (const [k, v] of Object.entries(data.midiMap)) {
-      if (v && v.address) midiMap.set(k, { address: v.address, kind: v.kind || 'trigger', args: v.args || [] });
+      if (v && v.address) midiMap.set(k, { address: v.address, kind: v.kind || 'trigger', args: projectOscArgs(v.args) });
     }
   }
   laneAlloc.importGroups(data.laneGroups);
@@ -5564,7 +6394,7 @@ function applyProject(data) {
         }))
       : [];
     const audioClips = migrateAudioClips(data, songs, lanes.length ? lanes : [{ id: 1, kind: 'A' }]);
-    return { songs, lanes: lanes.length ? lanes : [], audioClips, recLaneId: null };
+    return { songs, lanes: lanes.length ? lanes : [], audioClips, recLaneId: null, laneGroups: data.laneGroups };
   })() : null;
   // ===== THƯ VIỆN NHẠC DÙNG CHUNG (v10) =====
   // File mới: data.songs là thư viện chung. File cũ (v≤9): GỘP nhạc của các bài lại
@@ -5592,7 +6422,7 @@ function applyProject(data) {
     state.songs = lib;
   }
   state.folders = (Array.isArray(data.folders) && data.folders.length)
-    ? data.folders.map((f) => migrateFolder(f, legacyActive && { ...legacyActive, isOwnFolder: f.id === data.activeFolderId }, state.songs, idAlias))
+    ? data.folders.map((f) => migrateFolder(f, { ...legacyActive, laneGroups: data.laneGroups, isOwnFolder: f.id === data.activeFolderId }, state.songs, idAlias))
     : [Object.assign({ id: nid(), name: 'Chính', offset: 0, events: [], cues: [], color: '', hidden: false, collapsed: false }, freshProjectData())];
   state.songIndex = -1;
   state.autoAdvance = data.autoAdvance !== false;
@@ -5615,6 +6445,14 @@ function applyProject(data) {
   renderProps();
   updateSelBar();
   const st = data.settings || {};
+  state.useLearnedMappingFallback = typeof st.useLearnedMappingFallback === 'boolean'
+    ? st.useLearnedMappingFallback : !!REC_CFG.USE_LEARNED_MAPPING_FALLBACK;
+  if ($('learnedMappingFallback')) $('learnedMappingFallback').checked = state.useLearnedMappingFallback;
+  state.laneGroupMode = ['layer+type', 'address'].includes(st.laneGroupMode) ? st.laneGroupMode : window.HSRealtime.LANE_GROUP_MODE;
+  if ($('laneGroupMode')) $('laneGroupMode').value = state.laneGroupMode;
+  REC_CFG.PIANO_END_ACTION = ['connect0', 'layerclear'].includes(st.pianoEndAction) ? st.pianoEndAction : window.HSRealtime.PIANO_END_ACTION;
+  if ($('pianoEndAction')) $('pianoEndAction').value = REC_CFG.PIANO_END_ACTION;
+  rebuildFlat();
   if (st.listenPort) { state.listenPort = st.listenPort; $('listenPort').value = st.listenPort; window.hs.setListenPort(st.listenPort); }
   if (st.targetHost) { state.target.host = st.targetHost; $('targetHost').value = st.targetHost; }
   if (st.targetPort) { state.target.port = st.targetPort; $('targetPort').value = String(st.targetPort); }
@@ -5732,7 +6570,7 @@ function selectAllCues() {
     const saved = localStorage.getItem(AUTOSAVE_KEY);
     if (saved) {
       const data = JSON.parse(saved);
-      if ([3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(data.version)) { applyProject(data); restored = true; }
+      if ([3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].includes(data.version)) { applyProject(data); restored = true; }
     }
   } catch (_) { /* bỏ qua */ }
   if (!restored) refreshAll();
@@ -5745,7 +6583,7 @@ function selectAllCues() {
    • PAD Tự động: địa chỉ từ MẪU (/midi/note/{n} — {n}=note 0-127, {c}=kênh 1-16).
    • PAD Học từ OSC vào: pad chưa có địa chỉ riêng → nhận message OSC vào GẦN NHẤT làm địa chỉ
      (giống "đơn tơ địa chỉ" của 404: bấm pad trên Resolume → cue học địa chỉ).
-   • Bounce: bấm pad (note-on) bắn OSC NGAY theo địa chỉ của pad — mọi lúc, không cần REC.
+   • Bounce: chỉ bắn mapping thật ngoài REC; trong REC, MIDI nối trực tiếp tới Resolume.
    • Ghi cue: khi REC BẬT + đang phát → note-on đặt cue bắn (mode Trigger), note-off kéo dài
      cue (mode Piano — "giữ/nhả" như 404). */
 function noteName(n) {
@@ -5831,16 +6669,15 @@ function onMidiMessage(ev) {
 }
 
 
-/* ================= AUTO-REC BRIDGE: engine ↔ cue model =================
-   Engine (rec-engine.js) quyết định loại cue / địa chỉ OSC / keyframe.
-   Phần dưới chỉ tạo & cập nhật object cue trong project (không quyết định thời gian). */
+/* ================= AUTO-REC BRIDGE: utility descriptors -> cue model =================
+   Utility owns classification, matching and timestamps; renderer places final actions. */
 
 /* Chốt TOÀN BỘ phiên ghi đang mở (dừng timeline / tắt REC) */
 function recFinalizeOpen() {
   recStopTransaction();
 }
 
-/* Tạo cue "đang ghi" ngay khi nhấn MIDI — hiện trên timeline, độ dài tăng dần */
+/* Each action owns a definition, even when its address repeats. */
 function recCreateLiveCue(f, desc) {
   const addr = desc.address || '';
   const def = makeDef(addr, Array.isArray(desc.args) ? structuredClone(desc.args) : []);
@@ -5855,7 +6692,6 @@ function recCreateLiveCue(f, desc) {
   cue.lane = held ? held.name : (lanes[0] ? lanes[0].name : 'V1');
   cue.duration = desc.durationFrames || 0;
   cue.recording = true;            // UI: viền/nhãn "đang ghi"
-  cue.recGroup = desc.laneGroup || null;
   insertCue(f, cue);
   state.selClipId = null;
   return cue;
@@ -5867,61 +6703,66 @@ function recFinalizeCue(f, cue, desc) {
   cue.recording = false;
   if (desc.startFrame != null) cue.frame = Math.max(0, desc.startFrame - f.offset);
   cue.duration = desc.durationFrames || 0;
-  cue.recGroup = desc.laneGroup || null;
 
   let def = f.cues.find((c) => c.id === cue.cueId);
   if (!def) {
-    def = makeDef(desc.address || midiAddrFor(desc.num, desc.ch), desc.args && desc.args.length ? desc.args : [1]);
+    def = makeDef(desc.address || '', Array.isArray(desc.args) ? structuredClone(desc.args) : []);
     def.name = recCueName(desc, desc.address);
     f.cues.push(def);
     cue.cueId = def.id;
   }
-  // Gán địa chỉ OSC: OSC khớp > mapping học > chưa gán
-  let address = desc.address || '';
-  let guessed = false;
-  if (!address) {
-    const learned = midiMap.get(recMapKey(desc));
-    if (learned) { address = learned.address; guessed = true; }
-  }
-  const unassigned = !address;
-  def.address = address || '';
-  if (desc.args && desc.args.length) def.args = desc.args.slice();
+  // Utility owns matching and fallback decisions; never reinterpret its flags.
+  const address = desc.address || '';
+  const guessed = !!desc.guessed;
+  const unassigned = !!desc.unassigned;
+  def.address = address;
+  def.args = Array.isArray(desc.args) ? structuredClone(desc.args) : [];
   def.mode = desc.kind === 'float' ? 'float' : desc.kind === 'piano' ? 'piano' : 'trigger';
-  if (!def.name) def.name = recCueName(desc, address);
+  if (!def.nameEdited) def.name = recCueName(desc, address);
 
   // XẾP LANE theo nhóm (đã biết địa chỉ OSC thật ở bước này)
-  desc.address = desc.address || address || '';
-  desc.__cue = cue;                 // loại chính cue này khỏi kiểm tra chồng thời gian
-  const targetLane = recLaneByName(f, desc);
-  if (targetLane && targetLane !== cue.lane) cue.lane = targetLane;
+  recLayoutCue(f, cue, { ...desc, startFrame: cue.frame });
 
   cue.recMeta = {
     kind: desc.kind,
+    source: desc.source,
+    dataOrigin: desc.dataOrigin,
+    captureEndpoint: desc.kind === 'float' && desc.dataOrigin === 'osc' && !guessed && !unassigned &&
+      (!!desc.matched || desc.source === 'osc'),
+    recordingSpeed: desc.recordingSpeed,
+    ...(Number.isSafeInteger(desc.numericIndex) && desc.numericIndex >= 0 ? { numericIndex: desc.numericIndex } : {}),
+    ...(typeof desc.interpolation === 'string' ? { interpolation: desc.interpolation } : {}),
+    ...(desc.manualLane ? { manualLane: true } : {}),
+    session: desc.session,
+    actionId: desc.actionId,
+    device: desc.device,
+    mappingStatus: desc.mappingStatus,
+    startMs: desc.startMs,
+    endMs: desc.endMs,
     num: desc.num,
     ch: desc.ch,
     vel: desc.vel,
     holdMs: Math.round(desc.holdMs || 0),
-    matched: !!desc.address,
+    matched: !!desc.matched,
     guessed,
     unassigned,
     score: desc.score || 0,
-    latencyMs: desc.matchLatencyMs,
-    extras: desc.extras || [],
-    keyframes: desc.keyframes || [],
+    latencyMs: desc.matchLatencyMs == null ? desc.latencyMs : desc.matchLatencyMs,
+    extras: structuredClone(desc.extras || []),
+    keyframes: structuredClone(desc.keyframes || []),
     keyframesRaw: desc.keyframesRaw || 0,
     keyframesSent: desc.keyframesSent || 0
   };
-  if (state.recSmpteInput) cue.smpteInput = true;
+  cue.smpteInput = !!desc.smpteInput;
 
   // mapping learn: chỉ lưu khi có OSC thật (không lưu suy đoán)
-  if (desc.address) {
+  if (desc.matched && !guessed && !unassigned && address && desc.source !== 'osc' && desc.num != null) {
     const k = recMapKey(desc);
     const prev = midiMap.get(k);
     if (prev && prev.address !== desc.address) {
       flashStatus(`Resolume đổi mapping: ${prev.address} → ${desc.address}. Đã cập nhật.`);
     }
     midiMap.set(k, { address: desc.address, kind: desc.kind, args: (desc.args || []).slice() });
-    laneAlloc.remember(desc.laneGroup, cue.lane);
   }
   if (unassigned) {
     flashStatus(`⚠ Cue MIDI ${desc.num} ch${desc.ch} CHƯA GÁN OSC — dùng "Chọn từ OSC" để gán.`);
@@ -5935,91 +6776,103 @@ function recFinalizeCue(f, cue, desc) {
 }
 
 function recMapKey(desc) {
-  return (desc.kind === 'float' || desc.vel == null)
+  const key = (desc.source === 'cc' || desc.kind === 'float')
     ? 'cc' + desc.num + 'c' + desc.ch
     : 'n' + desc.num + 'c' + desc.ch;
+  return desc.device ? desc.device + '|' + key : key;
 }
 
 /* Tên cue tự đặt từ mapping Resolume nếu nhận ra layer/clip */
 function recCueName(desc, address) {
-  const a = address || '';
-  const m = /^\/composition\/layers\/(\d+)\/clips\/(\d+)/i.exec(a);
-  if (m) return `Layer ${m[1]} · Clip ${m[2]}`;
-  const c = /^\/composition\/columns\/(\d+)/i.exec(a);
-  if (c) return `Column ${c[1]}`;
-  if (a) {
-    const tail = a.split('/').filter(Boolean).slice(-1)[0];
-    return tail ? tail.charAt(0).toUpperCase() + tail.slice(1) : a;
-  }
-  if (desc.kind === 'float') return `CC ${desc.num} · ch${desc.ch}`;
-  return `MIDI ${desc.num} · ch${desc.ch}`;
+  return window.HSCueLayout.resolveCueName(address, desc);
 }
 
 /* Xếp lane R cho cue theo nhóm: cùng nhóm → cùng lane; chồng thời gian (Piano/Float) → lane phụ */
 function recLaneByName(f, desc) {
-  // Tính lại groupKey từ dữ liệu MỚI NHẤT (address đã biết) — không dùng laneGroup cũ lúc đang ghi
-  if (window.HSREC) desc.laneGroup = HSREC.groupKeyFor(desc);
-  const gk = desc.laneGroup || ('g' + desc.num);
-  const snapshot = state.lanes.map((l) => ({
-    id: l.id, name: l.name, kind: l.kind,
-    cues: f.events.filter((e) => e.lane === l.name && e !== desc.__cue)
-      .map((e) => ({ frame: e.frame, duration: e.duration || 0 }))
-  }));
-  let chosen = laneAlloc.allocate(desc, snapshot);
-  if (chosen && chosen.laneName) return chosen.laneName;
-
-  const lane = addLane('R', true);   // silent: tránh render nhiều lần
-  laneAlloc.remember(gk, lane.name);
+  const lanes = f.id === state.activeFolderId ? state.lanes : (f.lanes || (f.lanes = []));
+  const plan = window.HSCueLayout.planLane({ descriptor: desc, lanes, events: f.events,
+    config: { ...REC_CFG, LANE_GROUP_MODE: state.laneGroupMode, regroup: !!desc.regroup } });
+  if (plan.preserveManual) return plan.laneName;
+  let lane = lanes.find((item) => item.id === plan.laneId);
+  if (plan.create) {
+    let n = 1;
+    while (lanes.some((item) => item.name === 'R' + n)) n++;
+    lane = { id: nid(), name: 'R' + n, kind: 'R', locked: false, autoRec: true };
+    lanes.splice(plan.index, 0, lane);
+  } else if (plan.index != null) {
+    lanes.splice(lanes.indexOf(lane), 1);
+    lanes.splice(plan.index, 0, lane);
+  }
+  Object.assign(lane, { recGroup: plan.groupKey, groupLabel: plan.groupLabel,
+    color: lane.colorManual ? lane.color : plan.color, auxiliary: !!plan.auxiliary });
+  f.lanes = lanes;
   return lane.name;
 }
 
-function padAddr(note, ch) {
-  const key = midiNoteKey(note, ch);
-  if (state.midiPadMode === 'learn' && MIDI.padMap.has(key)) return MIDI.padMap.get(key);
-  return midiAddrFor(note, ch);   // auto: luôn theo mẫu
+function recLayoutCue(f, cue, desc, regroup = false) {
+  cue.lane = recLaneByName(f, { ...desc, __cue: cue, regroup });
+  if (regroup) cue.manualLane = false;
+  const lane = f.lanes.find((item) => item.name === cue.lane);
+  if (cue.laneId != null) cue.laneId = lane.id;
+  cue.recGroup = lane.recGroup || null;
+  const def = f.cues.find((item) => item.id === cue.cueId);
+  if (def && !def.colorManual) def.color = lane.color || '';
+  recNormalizeLanes(f);
 }
 
-function midiNoteOn(note, ch, vel) {
-  const addr = padAddr(note, ch);
+function padAddr(note, ch, device = state.midiDeviceId) {
+  const key = midiNoteKey(note, ch);
+  const mapping = (device && midiMap.get(device + '|' + key)) || midiMap.get(key);
+  return (device && MIDI.padMap.get(device + '|' + key)) || MIDI.padMap.get(key) || (mapping && mapping.address) || '';
+}
+
+function recSendMidi(kind, num, ch, value, timeStamp, device) {
+  const tx = recTransactions.get(recActiveSession);
+  if (!tx || tx.cutoff !== null || !state.recArmed || !state.playing || !oscPort) return false;
+  const t = Number.isFinite(timeStamp) ? (timeStamp > 1e12 ? timeStamp : performance.timeOrigin + timeStamp)
+    : performance.timeOrigin + performance.now();
+  // Keep pre-ACK MIDI after recStart on the same FIFO port, including a following recStop.
+  try { oscPort.post({ type: 'recMidi', session: tx.session, event: { kind, num, ch, value, t, device } }); }
+  catch (_) { recInterrupt('Không gửi được MIDI tới recorder'); return false; }
+  return true;
+}
+
+function midiDisconnect(device) {
+  let held = false;
+  for (const [key, note] of [...MIDI.notes]) {
+    if (note.device !== device) continue;
+    midiNoteOff(note.note, note.ch, undefined, device);
+    MIDI.notes.delete(key);
+    held = true;
+  }
+  if (held || recActiveSession !== null) setStatus('MIDI ngắt kết nối; đã nhả note đang giữ, không tự chọn thiết bị khác.');
+}
+
+function midiNoteOn(note, ch, vel, timeStamp, device = state.midiDeviceId) {
+  const addr = padAddr(note, ch, device);
   // MONITOR MIDI: ghi nhận note-on (chưa biết Trigger/Piano → tạm 'Trigger', cập nhật khi off)
   MIDI.monOpen = MIDI.monOpen || new Map();
-  MIDI.monOpen.set(note + 'c' + ch, { t0: performance.now(), vel, label: noteName(note) });
+  const key = (device || '') + '|' + midiNoteKey(note, ch);
+  MIDI.monOpen.set(key, { t0: performance.now(), vel, label: noteName(note) });
   monPushMidi({
     kind: 'note', label: noteName(note), num: note, ch,
     type: 'Trigger', cls: 'trig', val: 'vel ' + vel,
     rawVal: vel / 127, holdFrames: 0
   });
-  // BOUNCE: bắn OSC ngay theo địa chỉ pad (mặc định bật) — như bấm pad trong Resolume
-  if (state.midiBounce) sendOsc(addr, [1]);
-  // REC: chỉ ghi khi REC BẬT **và** timeline đang chạy
-  if (!state.recArmed || !state.playing) return;
-  const f = curFolder();
-  if (!f) { setStatus('Chưa có bài để ghi — nhấn ＋ Bài.'); return; }
-  const ms = performance.now();
-  const desc = recEngine.noteOn({ note, ch, vel, frame: state.frame, ms });
-  // cue "đang ghi" hiện ngay trên timeline (độ dài tăng dần tới khi nhả)
-  const live = recCreateLiveCue(f, {
-    kind: 'pending', num: note, ch, vel,
-    startFrame: Math.floor(state.frame), durationFrames: 0,
-    address: addr, provisional: true
-  });
-  // Báo utility bắt đầu cửa sổ đối chiếu OSC (chỉ 1 lần/note, không theo từng OSC)
-  const matchId = oscProcMidiStart('note', note, ch, performance.timeOrigin + ms, null);
-  MIDI.notes.set(midiNoteKey(note, ch), {
-    live, folderId: f.id, note, ch, vel, defNew: true, engineKey: desc.key, matchId
-  });
-  recDebug('noteOn', { note, ch, vel, frame: Math.round(state.frame) });
+  // During REC, physical MIDI drives Resolume; app Bounce would duplicate its feedback.
+  const bounce = state.midiBounce && addr && recActiveSession === null;
+  if (bounce) sendOsc(addr, [1]);
+  MIDI.notes.set(key, { note, ch, vel, device, bounceAddress: bounce ? addr : '' });
+  if (!recSendMidi('noteOn', note, ch, vel, timeStamp, device)) return;
   updateTransport();
-  refreshAll();
-  flashStatus(`● ĐANG GHI @ ${tcString(state.frame, state.fps)} — note ${note} ch${ch}`);
 }
 
-function midiNoteOff(note, ch) {
-  const key = midiNoteKey(note, ch);
+function midiNoteOff(note, ch, timeStamp, device = state.midiDeviceId) {
+  const key = (device || '') + '|' + midiNoteKey(note, ch);
   // MONITOR MIDI: nếu giữ ≥ ngưỡng Piano → thêm dòng Piano
-  const open = MIDI.monOpen && MIDI.monOpen.get(note + 'c' + ch);
+  const open = MIDI.monOpen && MIDI.monOpen.get(key);
   if (open) {
-    MIDI.monOpen.delete(note + 'c' + ch);
+    MIDI.monOpen.delete(key);
     const heldMs = performance.now() - open.t0;
     if (heldMs >= REC_CFG.PIANO_HOLD_THRESHOLD_S * 1000) {
       monPushMidi({
@@ -6031,86 +6884,24 @@ function midiNoteOff(note, ch) {
     }
   }
   const held = MIDI.notes.get(key);
-  if (!held) {
-    if (state.midiBounce) sendOsc(padAddr(note, ch), [0]);
-    return;
-  }
   MIDI.notes.delete(key);
-  const f = state.folders.find((x) => x.id === held.folderId);
-
-  // ENGINE: chốt Trigger/Piano theo thời gian giữ thật
-  const ms = performance.now();
-  const desc = recEngine.noteOff({ note, ch, frame: state.frame, ms });
-  // Đối chiếu OSC chạy trong UTILITY: xin kết quả rồi finalize cue
-  const finish = (match) => {
-    if (!f || !desc) { refreshAll(); scheduleAutosave(); return; }
-    const ff = state.folders.find((x) => x.id === held.folderId) || f;
-    // Utility thắng nếu tìm được OSC (địa chỉ cụ thể), nếu không dùng kết quả engine
-    if (match && match.address) {
-      desc.address = match.address;
-      desc.args = [match.value];
-      desc.unassigned = false;
-      desc.matchLatencyMs = match.latencyMs;
-    }
-    if (held.live && ff.events.includes(held.live)) recFinalizeCue(ff, held.live, desc, key);
-    refreshAll();
-    scheduleAutosave();
-  };
-  if (held.matchId) {
-    oscProcMidiEnd(held.matchId, performance.timeOrigin + ms).then(finish).catch(() => finish(null));
-  } else {
-    finish(null);
-  }
-
-  if (state.midiBounce) {
-    // nhả pad = thả nút Piano trong Resolume → gửi 0 (Trigger không cần off)
-    const kind = desc ? desc.kind : 'trigger';
-    if (kind !== 'trigger') sendOsc(padAddr(note, ch), [0]);
-  }
-  recDebug('noteOff', { note, ch, kind: desc && desc.kind, dur: desc && desc.durationFrames });
+  const bounce = state.midiBounce && recActiveSession === null;
+  recSendMidi('noteOff', note, ch, 0, timeStamp, device);
+  const addr = held ? held.bounceAddress : padAddr(note, ch, device);
+  if (bounce && addr) sendOsc(addr, [0]);
   updateTransport();
 }
 
 /* Núm vặn / fader (CC) → cue Float: vặn là "cử chỉ" → 1 cue, kéo dài tới khi ngưng vặn,
    giá trị def luôn = mức mới nhất (mô hình dữ liệu gửi args theo cue gốc). */
-function midiCC(ccNum, ch, val) {
+function midiCC(ccNum, ch, val, timeStamp, device = state.midiDeviceId) {
   // MONITOR MIDI: mọi CC đều hiện (kể cả khi REC tắt)
   monPushMidi({
     kind: 'cc', label: 'CC ' + ccNum, num: ccNum, ch,
     type: 'Float', cls: 'float', val: (val / 127).toFixed(3),
     rawVal: val / 127, isCC: true, holdFrames: 0
   });
-  if (!state.recArmed || !state.playing) return;
-  const f = curFolder();
-  if (!f) return;
-  const rl = recLane();
-  if (rl && rl.locked) return;
-
-  const ms = performance.now();
-  const res = recEngine.cc({ cc: ccNum, ch, val, frame: state.frame, ms });
-  if (!res || !res.cue) return;
-
-  if (res.type === 'open') {
-    const live = recCreateLiveCue(f, {
-      kind: 'float', num: ccNum, ch,
-      startFrame: Math.floor(state.frame), durationFrames: 0,
-      address: midiAddrFor(ccNum, ch), provisional: true
-    });
-    // utility mở cửa sổ đối chiếu float (family = 'opacity'/… nếu biết)
-    const matchId = oscProcMidiStart('float', ccNum, ch, performance.timeOrigin + ms, null);
-    MIDI.cc.set('cc' + ccNum + 'c' + ch, { live, folderId: f.id, engineCueId: res.cue.id, matchId });
-    updateTransport();
-    refreshAll();
-  } else {
-    const h = MIDI.cc.get('cc' + ccNum + 'c' + ch);
-    if (h && h.live) {
-      h.live.duration = Math.max(0, res.cue.durationFrames);
-      const def = f.cues.find((c) => c.id === h.live.cueId);
-      if (def) def.args = [res.cue.value];
-    }
-  }
-  recDebug('cc', { cc: ccNum, ch, val, type: res.type });
-  scheduleAutosave();
+  recSendMidi('cc', ccNum, ch, val, timeStamp, device);
 }
 
 /* PAD LEARN — "đơn tơ địa chỉ" kiểu 404: đang ở chế độ Học + có CUE đang chọn
@@ -6134,12 +6925,18 @@ function midiPadLearn(address, args) {
   if (!f) return;
   const def = f.cues.find((c) => c.id === cue.cueId);
   if (!def) return;
-  if (def.address === address) return;      // đã đúng — khỏi đụng (không spam undo)
+  if (def.address === address && !(cue.recMeta && cue.recMeta.unassigned)) return;
   // Dữ liệu cập nhật ngay (đúng semantics: OSC vào gần nhất thắng)
   def.address = address;
   if (Array.isArray(args) && args.length) def.args = args.slice();
-  if (!def.name || /^Pad \d+$/.test(def.name)) {
-    def.name = address.split('/').filter(Boolean).slice(-1)[0] || def.name;
+  if (!def.nameEdited) def.name = recCueName(cue.recMeta || {}, address);
+  recLayoutCue(f, cue, { ...(cue.recMeta || {}), address, kind: def.mode,
+    startFrame: cue.frame, durationFrames: cue.duration }, true);
+  if (cue.recMeta) {
+    Object.assign(cue.recMeta, { unassigned: false, guessed: false, matched: false, mappingStatus: 'manual' });
+    if (cue.recMeta.num != null && cue.recMeta.source !== 'osc') {
+      midiMap.set(recMapKey(cue.recMeta), { address, kind: cue.recMeta.kind, args: structuredClone(def.args) });
+    }
   }
   // UI + undo: gom theo cửa sổ ngắn
   if (!learnPending) learnPending = { firstAt: performance.now() };
@@ -6157,12 +6954,29 @@ function flushLearnUi() {
   noteChange();
   renderFolders();
   renderProps();
+  scheduleAutosave();
   if (performance.now() - (p.firstAt || 0) >= 0) {
     flashStatus(`Đã học địa chỉ: ${p.address} → cue "${p.def.name}" (Cmd+Z hoàn tác).`);
   }
 }
 
 /* ---------- UI gắn kết ---------- */
+if ($('learnedMappingFallback')) {
+  $('learnedMappingFallback').checked = state.useLearnedMappingFallback;
+  $('learnedMappingFallback').addEventListener('change', (e) => {
+    state.useLearnedMappingFallback = !!e.target.checked;
+    noteChange();
+    scheduleAutosave();
+  });
+}
+if ($('laneGroupMode')) {
+  $('laneGroupMode').value = state.laneGroupMode;
+  $('laneGroupMode').addEventListener('change', (e) => {
+    state.laneGroupMode = ['layer+type', 'address'].includes(e.target.value) ? e.target.value : window.HSRealtime.LANE_GROUP_MODE;
+    scheduleAutosave();
+    noteChange();
+  });
+}
 $('mrMidiScan').addEventListener('click', midiScan);
 $('mrMidiDevice').addEventListener('change', (e) => {
   state.midiDeviceId = e.target.value || null;
@@ -6172,16 +6986,13 @@ $('mrMidiDevice').addEventListener('change', (e) => {
 $('mrSource').addEventListener('change', (e) => {
   state.recSource = e.target.value === 'osc' ? 'osc' : 'midi';
   pushOscMode();
-  const midiOnly = state.recSource === 'midi';
-  $('mrBounce').parentElement.style.display = midiOnly ? '' : 'none';
-  $('mrPadBox').style.display = midiOnly ? '' : 'none';
-  $('mrTpl').style.display = midiOnly ? '' : 'none';
-  $('mrMidiBox').style.display = midiOnly ? '' : 'none';
-  $('mrMidiScan').style.display = midiOnly ? '' : 'none';
+  $('mrBounce').parentElement.style.display = '';
+  $('mrPadBox').style.display = '';
+  $('mrTpl').style.display = '';
+  $('mrMidiBox').style.display = '';
+  $('mrMidiScan').style.display = '';
   scheduleAutosave();
-  flashStatus(state.recSource === 'midi'
-    ? 'REC nguồn MIDI: bấm pad trên đàn → ghi cue (bounce OSC bật).'
-    : 'REC nguồn OSC: Resolume gửi về :7000 → ghi cue theo bộ lọc.');
+  flashStatus('REC thống nhất luôn ghi cả MIDI + OSC; nguồn chọn chỉ để tham khảo. Bounce chỉ gửi mapping thật.');
 });
 $('mrPadMode').addEventListener('change', (e) => {
   state.midiPadMode = e.target.value === 'learn' ? 'learn' : 'auto';
@@ -6274,7 +7085,7 @@ setTimeout(() => { midiScan(); }, 800);
       const d = f && f.cues.find((c) => c.id === cmd.cueId);
       if (!d) { setStatus('Mini: không tìm thấy cue.'); return; }
       if (!d.address) { setStatus(`Mini: cue "${d.name}" chưa có địa chỉ OSC.`); return; }
-      sendOsc(d.address, d.args);       // engine chính là nguồn gửi OSC duy nhất
+      sendOsc(d.address, d.args, d.outputTarget); // engine chính là nguồn gửi OSC duy nhất
       flashStatus(`Mini đã bắn cue: ${d.name} → ${d.address}`);
       return;
     }

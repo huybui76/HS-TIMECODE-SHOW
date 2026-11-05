@@ -373,6 +373,24 @@
             <option value="custom">Regex tuỳ chỉnh…</option>
           </select>
         </div>
+        <div class="row">
+          <label for="laneGroupMode">Nhóm hàng REC</label>
+          <select id="laneGroupMode" style="flex:1">
+            <option value="layer+type">Theo layer và tham số</option>
+            <option value="address">Theo địa chỉ OSC chính xác</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="pianoEndAction">Kết thúc Piano</label>
+          <select id="pianoEndAction" style="flex:1">
+            <option value="connect0">Gửi connect 0</option>
+            <option value="layerclear">Clear layer</option>
+          </select>
+        </div>
+        <label class="row" title="Khi thiếu OSC phản hồi, dùng mapping đã học và đánh dấu cue suy đoán. Float vẫn không giả lập đường cong OSC từ MIDI.">
+          <input id="learnedMappingFallback" type="checkbox" checked>
+          Dùng mapping đã học khi thiếu phản hồi
+        </label>
         <input id="filterRegex" placeholder="regex, ví dụ /connect$" style="display:none">
         <div class="hint" id="filterHint"></div>
         <div class="row">
@@ -387,9 +405,9 @@
       <div class="panel-sec">
         <div class="row">
           <label>Nguồn</label>
-          <select id="mrSource" title="Nguồn ghi: đàn MIDI (Web MIDI) hoặc OSC gửi tới từ Resolume" style="flex:1">
-            <option value="midi">MIDI (đàn/pad)</option>
-            <option value="osc">Resolume (OSC)</option>
+          <select id="mrSource" title="Luôn ghi cả MIDI và OSC; lựa chọn này chỉ đổi nguồn ưu tiên hiển thị" style="flex:1">
+            <option value="midi">MIDI + OSC (đàn/pad)</option>
+            <option value="osc">MIDI + OSC (Resolume)</option>
           </select>
         </div>
         <label class="row" id="mrMidiBox" title="Thiết bị MIDI vào (đàn/pad controller)">
@@ -654,6 +672,10 @@
   <script src="../realtime-config.js"></script>
   <script src="osc-feedback.js"></script>
   <script src="rec-engine.js"></script>
+  <script src="cue-layout.js"></script>
+  <script src="curve-tools.js"></script>
+  <script src="curve-editor.js"></script>
+  <script src="cue-playback.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

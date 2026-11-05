@@ -38,6 +38,7 @@
       "realtime-config.js",
       "recording-session.js",
       "osc-targets.js",
+      "osc-encode.js",
       "lan-sync.js"
     ],
     "mac": {
