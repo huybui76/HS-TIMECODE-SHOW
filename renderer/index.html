@@ -259,35 +259,102 @@
             <div class="pf colorsf"><label>MÀU</label><div id="pSwatches"></div></div>
             <button id="pHideBtn" class="hidebtn" title="Làm mờ cue trên timeline (thêm sọc chéo) và KHÔNG gửi OSC khi phát">⊘ ẨN CLIP</button>
           </div>
+          <div id="pRecMeta" class="rec-meta" hidden></div>
         </div>
       </div>
     </section>
 
+    <!-- MÉP KÉO: nằm GIỮA timeline và panel phải (mép trái của panel) -->
+    <div id="splitR" class="vsplit" title="Kéo ngang để đổi độ rộng panel phải"></div>
+
     <aside id="oscPanel" hidden>
-      <div class="panel-head">KẾT NỐI OSC</div>
-      <div class="panel-sec">
-        <div class="row">
-          <label>Cổng nghe</label>
-          <input id="listenPort" type="number" value="7000" min="1024" max="65535">
-          <button id="btnApplyPort">Áp dụng</button>
-        </div>
-        <div class="row">
-          <label>OSC</label>
-          <button id="btnOscToggle" title="Bật/tắt cổng nghe OSC. Khi TẮT app không nghe mạng gì cả (vẫn gửi cue được).">▶ Bật OSC</button>
-          <span id="oscStatus" class="pill off">TẮT</span>
-        </div>
-        <div class="row">
-          <label>Gửi tới</label>
-          <input id="targetHost" value="127.0.0.1" style="width:100px">
-          <input id="targetPort" type="number" value="7001" style="width:64px">
-        </div>
-        <button id="btnCheckResolume" title="Gửi lệnh test (bật clip Layer 1 Clip 1) và chờ phản hồi">
-          Kiểm tra Resolume
-        </button>
-        <div class="hint">Mặc định khớp Resolume trên máy này: app nghe :7000 (Resolume Output), gửi lệnh tới :7001 (Resolume Input). Nếu không nhận được: Arena → Preferences → OSC → <b>Output</b> bật lên, Address 127.0.0.1, Port <b>7000</b>.</div>
+      <!-- TOOLBAR ẨN/HIỆN NHANH -->
+      <div id="oscTabbar">
+        <button class="osc-tab on" data-pane="paneOsc" title="Địa chỉ OSC (nhiều máy)">🖥 OSC</button>
+        <button class="osc-tab" data-pane="paneLan" title="Backup / đồng bộ show qua LAN">🔗 LAN</button>
+        <button class="osc-tab" data-pane="paneMidi" title="Ghi MIDI + cấu hình bộ lọc">🎹 GHI</button>
+        <button class="osc-tab" data-pane="paneMon" title="Monitor OSC">📈 MON</button>
+        <span class="spacer"></span>
+        <span id="lanSummary" class="lan-summary" title="Máy khác trong nhóm">—</span>
       </div>
 
-      <div class="panel-head">GHI / BỘ LỌC</div>
+      <!-- ===== PANE: ĐỊA CHỈ OSC ===== -->
+      <div id="paneOsc" class="osc-pane">
+        <div class="panel-head">
+          ĐỊA CHỈ OSC
+          <span class="spacer"></span>
+          <button id="btnAddOscTarget" class="mini" title="Thêm địa chỉ OSC (máy Resolume / máy backup khác)">＋ Thêm</button>
+          <button id="btnOscToggle" class="mini on" title="Bật/tắt cổng nghe OSC">■ Bật</button>
+        </div>
+        <div class="panel-sec">
+          <div class="row">
+            <label>Cổng nghe</label>
+            <input id="listenPort" type="number" value="7000" min="1024" max="65535" title="Tự áp dụng sau 0,6s">
+            <span id="oscStatus" class="pill off">TẮT</span>
+          </div>
+          <div class="hint">Cổng nghe tự áp dụng ngay khi đổi. <b>RX</b> = OSC nhận từ Resolume, <b>TX</b> = lệnh gửi đi.</div>
+        </div>
+        <div id="oscTargetList" class="osc-target-list"></div>
+        <div class="panel-sec">
+          <div class="hint">Cùng máy: <b>127.0.0.1</b> · máy khác: IP máy đó. Port = Incoming Port của Resolume (mặc định 7001).
+            Mỗi cue gửi tới <b>tất cả địa chỉ đang bật</b>.</div>
+        </div>
+
+        <div class="panel-head">GỬI THỬ</div>
+        <div class="panel-sec">
+          <input id="testAddr" value="/composition/layers/1/clips/1/connect">
+          <div class="row">
+            <input id="testArgs" value="1" style="flex:1" placeholder="tham số, phẩy cách nhau">
+            <button id="btnTestSend">Gửi</button>
+          </div>
+        </div>
+
+        <div class="panel-head">
+          OSC ĐÃ NHẬN — TẠO CUE
+          <span class="spacer"></span>
+          <button id="mrDedupe" class="mini" title="Xóa cue trùng (cùng địa chỉ + cùng thời điểm, trong thư mục đang chọn)">Dọn trùng</button>
+          <button id="btnOscToCues" class="mini primary" title="Tạo cue từ mọi OSC chưa lưu, tại thanh đò">Tất cả → Cue</button>
+        </div>
+        <div id="oscSeenList" style="padding:6px 8px;font-size:11px;color:#85858f;"></div>
+      </div>
+
+      <!-- ===== PANE: LAN / BACKUP ===== -->
+      <div id="paneLan" class="osc-pane" hidden>
+        <div class="panel-head">BACKUP — ĐỒNG BỘ LAN</div>
+        <div class="panel-sec">
+          <div class="row">
+            <label>Trạng thái</label>
+            <span id="lanState" class="pill off">TẮT</span>
+            <span class="spacer"></span>
+            <button id="btnLanToggle" class="mini primary">Bật LAN</button>
+          </div>
+          <div class="row">
+            <label>Vai trò</label>
+            <select id="lanRole" style="flex:1">
+              <option value="master">Máy chính (phát show)</option>
+              <option value="backup">Máy backup (nhận show)</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>Tên máy</label>
+            <input id="lanName" placeholder="tên hiển thị">
+          </div>
+          <div class="row">
+            <label>Nhóm</label>
+            <input id="lanGroup" value="404TC">
+          </div>
+          <label class="inline small" style="display:flex;gap:6px;align-items:center">
+            <input type="checkbox" id="lanFollow" checked> Theo máy chính: show, LTC, Play
+          </label>
+          <div id="lanSelf" class="hint"></div>
+        </div>
+        <div class="panel-head">CÁC MÁY</div>
+        <div id="lanPeers" class="osc-target-list"></div>
+      </div>
+
+      <!-- ===== PANE: MIDI ===== -->
+      <div id="paneMidi" class="osc-pane" hidden>
+        <div class="panel-head">GHI — BỘ LỌC &amp; NGUỒN</div>
       <div class="panel-sec">
         <div class="row">
           <label>Ghi vào</label>
@@ -342,39 +409,50 @@
           <input type="checkbox" id="mrBounce" checked> Bấm pad bắn OSC ngay
         </label>
         <div class="hint">REC BẬT (nút ● REC trên cùng) + đang phát → gõ pad là cue tự ghi vào LANE GHI ở trên. Note-off kéo dài cue (Piano).</div>
-      </div>
-
-      <div class="panel-head">GỬI THỬ</div>
-      <div class="panel-sec">
-        <input id="testAddr" value="/composition/layers/1/clips/1/connect">
-        <div class="row">
-          <input id="testArgs" value="1" style="flex:1" placeholder="tham số, phẩy cách nhau">
-          <button id="btnTestSend">Gửi</button>
+        <!-- METRICS OSC (utility process báo về) -->
+        <div id="oscMetrics" class="osc-metrics">
+          <span title="OSC leaf message/giây; khi idle không decode để đếm">RX <b id="omRx">0</b>/s</span>
+          <span title="UDP datagram/giây, gồm cả packet bị bỏ khi idle">UDP <b id="omPkt">0</b>/s</span>
+          <span title="Giữ lại sau lọc">lọc <b id="omKept">0</b></span>
+          <span title="Bị lọc bỏ">bỏ <b id="omFiltered">0</b></span>
+          <span title="Giới hạn 60Hz/địa chỉ">hạn <b id="omLimited">0</b></span>
+          <span title="Gói hỏng">lỗi <b id="omMalformed">0</b></span>
+          <span title="Tổng số lô UI đã gửi">UI <b id="omBatches">0</b></span>
+          <span title="Số lô dữ liệu/UI gửi renderer mỗi giây">IPC <b id="omIpc">0</b>/s</span>
+          <span title="Số sự kiện đang chờ hoặc đang gửi chưa được xác nhận">queue <b id="omQueue">0</b></span>
+          <span title="Sự kiện bị mất do quá tải; không phải số UDP packet mất trên mạng">rớt <b id="omDropped">0</b></span>
+          <span title="Utility event-loop delay p99">loop <b id="omLoop">0ms</b></span>
+          <span id="omBuf" title="UDP receive buffer">buf —</span>
         </div>
       </div>
 
-      <div class="panel-head" id="monHead">
-        MONITOR — OSC NHẬN ĐƯỢC
-        <span class="spacer"></span>
-        <label class="inline small"><input type="checkbox" id="monPause"> Tạm dừng</label>
-        <button id="btnMonClear" class="mini">Xóa</button>
-      </div>
-      <input id="monFilter" class="search" placeholder="🔍 Lọc OSC nhận được…" style="margin-bottom:4px">
-      <div id="monitor"></div>
-      <div class="panel-sec" style="border-bottom:none">
-        <div class="hint">Nhấn <b>＋</b> trên từng dòng OSC để biến nó thành cue (tại thanh đò, vào thư mục đang chọn).</div>
-      </div>
+      </div><!-- /paneMidi -->
 
-      <div class="panel-head">
-        OSC ĐÃ NHẬN — TẠO CUE
-        <span class="spacer"></span>
-        <button id="mrDedupe" class="mini" title="Xóa cue trùng (cùng địa chỉ + cùng thời điểm, trong thư mục đang chọn)">Dọn trùng</button>
-        <button id="btnOscToCues" class="mini primary" title="Tạo cue từ mọi OSC chưa lưu, tại thanh đò">Tất cả → Cue</button>
-      </div>
-      <div id="oscSeenList" style="padding:6px 8px;font-size:11px;color:#85858f;"></div>
+      <!-- ===== PANE: MONITOR (2 tab OSC | MIDI) ===== -->
+      <div id="paneMon" class="osc-pane" hidden>
+        <div class="mon-head">
+          <div class="mon-top">
+            <span class="mon-title">MONITOR</span>
+            <span class="mon-rate" id="monRate">—</span>
+            <span class="spacer"></span>
+            <button class="mini" id="monPauseBtn" title="Dừng hiển thị (vẫn nhận)">⏸</button>
+            <button class="mini" id="btnMonClear" title="Xoá danh sách">🗑</button>
+          </div>
+          <div class="mon-tabs">
+            <button class="mon-tab on" data-src="osc">OSC</button>
+            <button class="mon-tab" data-src="midi">MIDI</button>
+          </div>
+          <input id="monFilter" class="search" placeholder="Lọc địa chỉ / note / giá trị…">
+        </div>
+        <div id="monitor" class="mon-list"></div>
+        <div id="monitorMidi" class="mon-list" hidden></div>
+        <div class="mon-foot">
+          <span id="monCount">0 dòng</span>
+          <span class="spacer"></span>
+          <span>＋ = thêm vào cue</span>
+        </div>
+      </div><!-- /paneMon -->
     </aside>
-
-    <div id="splitR" class="vsplit" title="Kéo để đổi độ rộng panel"></div>
   </main>
 
   <footer id="statusbar">
@@ -573,6 +651,9 @@
     </div>
   </div>
 
+  <script src="../realtime-config.js"></script>
+  <script src="osc-feedback.js"></script>
+  <script src="rec-engine.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

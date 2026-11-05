@@ -1,0 +1,80 @@
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.HSRealtime = factory();
+})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  'use strict';
+  const config = {
+    RECORD_LATENCY_COMPENSATION_MS: 0,
+    PIANO_HOLD_THRESHOLD_S: 0.5,
+    DEFAULT_TRIGGER_LENGTH_S: 1,
+    FLOAT_IDLE_TIMEOUT_MS: 300,
+    MATCH_PRE_MS: 20,
+    MATCH_WINDOW_MS: 150,
+    MATCH_REPLY_TIMEOUT_MS: 500,
+    REC_DRAIN_TIMEOUT_MS: 2000,
+    REC_ACTION_BATCH_SIZE: 128,
+    REC_ACTION_QUEUE_CAPACITY: 4096,
+    REC_ACTION_MAX_IN_FLIGHT: 4,
+    REC_MAPPING_MAX: 4096,
+    REC_DIRECT_DEFER_MS: 170,
+    REC_MATCH_MIN_CORRELATION: 0.65,
+    REC_MATCH_AMBIGUITY_MARGIN: 5,
+    REC_MIDI_QUEUE_CAPACITY: 4096,
+    REC_HISTORY_LIMIT: 60,
+    REC_DIRECT_GRACE_MS: 30,
+    MATCH_ALIAS_MS: 10,
+    FLOAT_MATCH_MIN_CORRELATION: 0.65,
+    FLOAT_MATCH_MIN_SCORE: 0.70,
+    FLOAT_MATCH_AMBIGUITY: 0.08,
+    FLOAT_MATCH_MIN_PAIRS: 2,
+    OSC_BUFFER_SECONDS: 5,
+    OSC_RING_CAPACITY: 32768,
+    OSC_MAX_ADDRESSES: 8192,
+    OSC_RECV_BUFFER_BYTES: 8 * 1024 * 1024,
+    OSC_PER_ADDRESS_MAX_HZ: 60,
+    OSC_FILTER_CACHE_SIZE: 5000,
+    OSC_MAX_BUNDLE_DEPTH: 16,
+    OSC_EVENT_QUEUE_CAPACITY: 32768,
+    OSC_EVENT_QUEUE_BYTES: 8 * 1024 * 1024,
+    OSC_EVENT_BATCH_SIZE: 1024,
+    OSC_MAX_IN_FLIGHT_BATCHES: 4,
+    OSC_MAINTENANCE_MS: 10,
+    OSC_PENDING_MIDI_MAX: 4096,
+    OSC_RESTART_INITIAL_MS: 500,
+    OSC_RESTART_MAX_MS: 8000,
+    OSC_PROC_MAX_RESTARTS: 20,
+    OSC_STATS_RESOLUTION_MS: 10,
+    OSC_EVENT_LOOP_WARN_MS: 50,
+    OSC_DEBUG_INTERVAL_MS: 1000,
+    UI_BATCH_MS: 30,
+    UI_MAX_FPS: 30,
+    REC_UI_FLUSH_MS: 120,
+    REC_STATUS_INTERVAL_MS: 800,
+    STATS_INTERVAL_MS: 1000,
+    FLOAT_RDP_EPSILON: 0.004,
+    FLOAT_MAX_POINTS: 4096,
+    FLOAT_PLAY_SEND_EPSILON: 0.002,
+    CHORD_PAIR_TOLERANCE_MS: 120,
+    MIN_FLOAT_KEYFRAMES: 2,
+    PLAYBACK_FLOAT_HZ: 30,
+    LANE_GROUP_MODE: 'layer+type',
+    AUTO_REMOVE_EMPTY_LANES: true,
+    USE_LEARNED_MAPPING_FALLBACK: true,
+    PIANO_END_ACTION: 'connect0',
+    OSC_HARD_BLOCK_SEGMENTS: ['position', 'textgenerator', 'tempocontroller', 'dashboard'],
+    OSC_NOISY_SEGMENTS: ['transport', 'audio'],
+    DEFAULT_WHITELIST: [
+      '/composition/layers/*/clips/*/connect',
+      '/composition/columns/*/connect',
+      '/composition/layers/*/clear',
+      '/composition/groups/*/columns/*/connect',
+      '/composition/groups/*/layers/*/clips/*/connect',
+      '/composition/groups/*/layers/*/clear'
+    ],
+    DEFAULT_BLACKLIST: ['/sys/*', '/midi/*', '/composition/layers/*/connected']
+  };
+  for (const value of Object.values(config)) {
+    if (Array.isArray(value)) Object.freeze(value);
+  }
+  return Object.freeze(config);
+});

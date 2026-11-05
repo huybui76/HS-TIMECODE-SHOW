@@ -27,10 +27,18 @@
     "asar": true,
     "files": [
       "main.js",
+      "osc-input-filter.js",
       "preload.js",
       "conversion-manager.js",
       "renderer/**",
-      "package.json"
+      "package.json",
+      "osc-parser.js",
+      "osc-ring.js",
+      "osc-ingest.js",
+      "realtime-config.js",
+      "recording-session.js",
+      "osc-targets.js",
+      "lan-sync.js"
     ],
     "mac": {
       "target": [
