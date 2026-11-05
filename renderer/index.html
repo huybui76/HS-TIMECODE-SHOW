@@ -132,18 +132,39 @@
           <span class="mlabel">BÀI HÁT</span>
           <span id="songCount" class="count-chip">0</span>
           <span class="spacer"></span>
+          <input id="songSearch" class="search-inline" placeholder="Tìm bài…">
           <button id="btnSongSearch" class="icon-btn" title="Tìm bài hát — bấm để mở/đóng ô tìm">🔍</button>
           <button id="btnSortSongs" title="Sắp xếp A→Z">A→Z</button>
-          <span class="songplay" role="group" aria-label="Phát bài hát đang chọn">
-            <button id="btnSongPlay" class="spbtn play" title="Phát bài đang chọn (từ vị trí đang đứng)" disabled>▶</button>
-            <button id="btnSongPause" class="spbtn pause" title="Dừng phát — giữ vị trí để phát tiếp" disabled>⏸</button>
-            <button id="btnSongRestart" class="spbtn restart" title="Phát lại bài đang chọn từ đầu" disabled>↺</button>
-          </span>
-          <button id="btnAddSong" class="primary" title="Thêm bài hát">＋ Thêm</button>
         </div>
-        <input id="songSearch" class="search" placeholder="🔍 Tìm bài hát — tên hoặc số…" hidden>
-        <div id="audioDrop" title="Kéo thả file âm thanh từ Finder vào đây">
-          Thả file âm thanh vào đây,<br>hoặc nhấn <b>＋ Thêm</b>
+        <div id="audioDrop" title="Bấm để thêm nhạc — hoặc kéo file thả vào">
+          <span class="drop-plus">＋</span>
+          <span class="drop-txt">Thêm nhạc hoặc kéo vào
+            <span class="drop-fmt">MP3 · WAV · FLAC · M4A · AIFF</span></span>
+        </div>
+        <div class="songplay-bar" id="songPlayBar">
+          <button id="btnSongPlay" class="spbig play" title="Phát bài đang chọn (từ vị trí đang đứng)" disabled>
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          </button>
+          <button id="btnSongPause" class="spbig pause" title="Tạm dừng — giữ vị trí để phát tiếp" disabled>
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+          </button>
+          <button id="btnSongRestart" class="spbig restart" title="Phát lại bài đang chọn từ đầu" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+          </button>
+          <span class="spspeed">
+            <select id="songSpeed" title="Tốc độ phát khi nghe thử">
+              <option value="0.5">0.5×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option>
+              <option value="2">2×</option>
+            </select>
+          </span>
+        </div>
+        <div id="songNow" class="songnow" hidden>
+          <span id="songNowName" class="songnow-name"></span>
+          <span id="songNowTime" class="songnow-time">00:00 / 00:00</span>
+          <div class="songnow-bar"><i id="songNowFill"></i></div>
         </div>
         <div id="songList"></div>
       </div>

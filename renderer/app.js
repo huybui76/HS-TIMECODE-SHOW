@@ -866,7 +866,8 @@ function renderSongs() {
     item.append(info, pre, del, sprog);
     item.addEventListener('click', (e) => {
       if (e.target === del) return;
-      // CHỌN = chỉ lấy làm mốc thời gian — KHÔNG reset playhead, KHÔNG ngắt audio đang phát
+      // CHỌN = lấy làm mốc thời gian — KHÔNG reset playhead
+      // Nếu ĐANG PHÁT bài khác → chuyển sang phát chính bài vừa chọn (giữ viền vàng theo bài đang phát)
       const wasPlaying = !preview.audio.paused;
       activateSong(i, false, true);
       if (wasPlaying) previewStart(true); else previewSetState(false);
@@ -2521,13 +2522,14 @@ function tick() {
     infoDirty = false;
     updateInfoStrip();
   }
-  if (state.pps) { const pr = $('ppsRange'); if (pr) pr.value = ppsToSlider(state.pps); }
+  if (state.pps) { const pr = $('ppsRange'); if (pr) { pr.value = ppsToSlider(state.pps); syncSliderFill(pr); } }
   drawTimeline();
   requestAnimationFrame(tick);
 }
 
 setInterval(() => engineStep(performance.now()), 10);
 requestAnimationFrame(tick);
+syncAllSliders();   // tô màu thanh trượt khớp thumb ngay khi mở app
 
 /* Dải HIỆN TẠI / CUE TIẾP THEO / CÒN LẠI (của thư mục đang chọn) */
 function updateInfoStrip() {
@@ -2583,6 +2585,20 @@ audio.addEventListener('ended', () => {
 });
 
 /* ================= UI ================= */
+/* Cập nhật biến --p cho thanh trượt tự style: phần tô màu luôn khớp đúng vị trí thumb */
+function syncSliderFill(el) {
+  if (!el) return;
+  const min = Number(el.min || 0), max = Number(el.max || 100);
+  const v = Number(el.value);
+  const pct = max > min ? ((v - min) / (max - min)) * 100 : 0;
+  el.style.setProperty('--p', pct.toFixed(2) + '%');
+}
+function syncAllSliders() {
+  syncSliderFill($('ppsRange'));
+  syncSliderFill($('rowHRange'));
+  syncSliderFill($('vol'));
+}
+
 function updateTc() {
   // Đồng hồ cam lớn trên topbar đã bỏ (trùng ô HIỆN TẠI) — giữ hàm để các nơi gọi không lỗi
   const el = $('tcText');
@@ -2950,6 +2966,7 @@ $('vol').addEventListener('input', (e) => {
   masterVol = parseFloat(e.target.value);
   audio.volume = masterVol;   // khi đang phát clip, tick() sẽ nhân thêm volume/fade riêng của instance
   const vv = $('volVal'); if (vv) vv.textContent = Math.round(masterVol * 100) + '%';
+  syncSliderFill(e.target);
 });
 
 $('btnAddCue').addEventListener('click', () => {
@@ -3174,6 +3191,15 @@ function nudgeSelected(df) {
 
 $('cueSearch').addEventListener('input', (e) => { state.cueSearch = e.target.value; renderFolders(); });
 $('songSearch').addEventListener('input', (e) => { state.songSearch = e.target.value; renderSongs(); });
+$('songSearch').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.target.value = ''; state.songSearch = '';
+    e.target.classList.remove('open');
+    $('btnSongSearch').classList.remove('is-active');
+    $('btnSongSearch').closest('.musictools')?.classList.remove('searching');
+    renderSongs();
+  }
+});
 $('btnSortSongs').addEventListener('click', () => {
   const act = curSong();
   state.songs.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
@@ -3185,10 +3211,21 @@ $('btnSortSongs').addEventListener('click', () => {
 /* ===== Nghe thử bài hát trực tiếp (độc lập timeline/cue) ===== */
 function previewUpdate() {
   const song = state.songs.find((s) => s.id === preview.songId);
+  const d = preview.audio.duration || (song && song.duration) || 0;
+  const t = preview.audio.currentTime || 0;
+  // thanh tiến trình riêng dưới cụm nút phát
+  const nowEl = $('songNow');
+  if (nowEl) {
+    const show = !!song && (t > 0 || !preview.audio.paused);
+    nowEl.hidden = !show;
+    if (show) {
+      $('songNowName').textContent = song.name;
+      $('songNowTime').textContent = `${fmtDur(t)} / ${fmtDur(d)}`;
+      $('songNowFill').style.width = (d > 0 ? (t / d) * 100 : 0) + '%';
+    }
+  }
   const el = $('songList')?.querySelector('.song-item.previewing');
   if (!song || !el) return;
-  const d = preview.audio.duration || song.duration || 0;
-  const t = preview.audio.currentTime || 0;
   const pre = el.querySelector('.spre');
   if (pre) pre.textContent = `${fmtDur(t)} / ${fmtDur(d)}`;
   const bar = el.querySelector('.sprog i');
@@ -3244,7 +3281,13 @@ preview.audio.addEventListener('ended', () => previewSetState(false));
 $('btnSongPlay').addEventListener('click', () => previewStart(false));
 $('btnSongPause').addEventListener('click', () => { preview.audio.pause(); previewSetState(false); });
 $('btnSongRestart').addEventListener('click', () => previewStart(true));
-$('btnAddSong').addEventListener('click', async () => {
+/* tốc độ nghe thử — chỉ áp cho audio preview, không đụng timeline */
+const songSpeedSel = $('songSpeed');
+if (songSpeedSel) songSpeedSel.addEventListener('change', (e) => {
+  preview.audio.playbackRate = parseFloat(e.target.value) || 1;
+});
+/* Ô "Thêm nhạc hoặc kéo vào" = nút thêm nhạc (nút ＋ Thêm riêng đã bỏ) */
+$('audioDrop').addEventListener('click', async () => {
   const paths = await window.hs.openAudioMulti();
   if (paths && paths.length) {
     const added = paths.map((p) => addSongFile(p)).filter(Boolean);
@@ -3853,6 +3896,7 @@ $('toFilterType').addEventListener('change', (e) => { TEST_OSC.type = e.target.v
     applyZoom(sliderToPps(Number(ppsRange.value)));
     state.ppsInit = true;
     const pv = $('ppsVal'); if (pv) pv.textContent = Math.round(Number(ppsRange.value)) + '%';
+    syncSliderFill(ppsRange);
   });
 
   // thanh trượt CAO: chiều cao lane toàn bộ layer (V/R; lane A tỉ lệ 1.6×)
@@ -3860,6 +3904,7 @@ $('toFilterType').addEventListener('change', (e) => { TEST_OSC.type = e.target.v
     state.rowH = Number(e.target.value);
     state.aRowH = clamp(Math.round(state.rowH * 1.6), 30, 150);
     const rv = $('rowHVal'); if (rv) rv.textContent = state.rowH + 'px';
+    syncSliderFill(e.target);
     scheduleAutosave();
   });
 
@@ -3880,6 +3925,22 @@ function switchCueTab(cueTab) {
 
 function toggleSearch(inputId, btnId) {
   const input = $(inputId), btn = $(btnId);
+  // ô tìm trong hàng công cụ (có class search-inline) → xổ tại chỗ, không xuống hàng
+  const inline = input.classList.contains('search-inline');
+  if (inline) {
+    const open = input.classList.toggle('open');
+    btn.classList.toggle('is-active', open);
+    // panel hẹp: đang mở tìm kiếm thì ẩn nhãn BÀI HÁT + badge số để ô tìm vừa 1 hàng
+    const tools = btn.closest('.musictools');
+    if (tools) tools.classList.toggle('searching', open);
+    if (open) { input.focus(); }
+    else {
+      input.value = '';
+      state.songSearch = '';
+      renderSongs();
+    }
+    return;
+  }
   input.hidden = !input.hidden;
   btn.classList.toggle('is-active', !input.hidden);
   if (!input.hidden) {

@@ -10,6 +10,7 @@
   --red: #ff3b3b;
   --green: #2ee06f;
   --blue: #4f8cff;
+  --yellow: #ffd24a;
 }
 html, body { height: 100%; }
 body {
@@ -189,6 +190,13 @@ button, select, input {
   font-size: 13px;
   outline: none;
 }
+/* range slider không được dính nền/viền/bo góc của input thường (tạo "viên thuốc" thừa 2 đầu) */
+input[type="range"] {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+}
 button { cursor: pointer; }
 button:hover { background: #26262d; border-color: #3a3a44; }
 button:active { transform: translateY(1px); }
@@ -206,8 +214,36 @@ button.rec.armed { background: #571c1c; border-color: var(--red); color: #ff9d9d
 .sld .sldval { font: 700 9.5px "SF Mono", Menlo, monospace; color: #b9b9c5; min-width: 30px; text-align: right; }
 .sld-ic { color: #9a9aa8; font-size: 12px; width: 13px; text-align: center; }
 .sld-ic.vol { color: #9cc0ff; }
-.sld input { width: 140px; height: 8px; accent-color: #ff9f43; }
-.sld input#vol { accent-color: #4f8cff; }
+/* Slider tự style: KHÔNG ép height trên input native (làm thumb bị phóng to, không tới 2 đầu).
+   Track 4px vẽ bằng gradient theo biến --p (JS cập nhật) → phần đã kéo luôn khớp thumb. */
+.sld input {
+  -webkit-appearance: none; appearance: none;
+  width: 140px; height: 16px; margin: 0; padding: 0;
+  background: transparent; outline: none; cursor: pointer;
+}
+.sld input::-webkit-slider-runnable-track {
+  height: 4px; border-radius: 2px;
+  /* thu track vào đúng nửa thumb mỗi bên → tâm thumb chạm đúng 2 đầu track (0% và 100%)
+     không còn "khoảng thừa" ở hai đầu như track chạy hết chiều ngang input */
+  margin: 6px 7px;
+  background: linear-gradient(to right,
+    #ff9f43 0, #ff9f43 var(--p, 50%),
+    #34343e var(--p, 50%), #34343e 100%);
+}
+.sld input::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #ff9f43; border: none;
+  margin-top: -5px;                       /* (14 − 4) / 2 — căn giữa track 4px */
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .45);
+}
+.sld input#vol::-webkit-slider-runnable-track {
+  background: linear-gradient(to right,
+    #4f8cff 0, #4f8cff var(--p, 90%),
+    #34343e var(--p, 90%), #34343e 100%);
+}
+.sld input#vol::-webkit-slider-thumb { background: #4f8cff; }
+.sld input::-webkit-slider-thumb:hover { filter: brightness(1.12); }
 .sld-sep { width: 1px; height: 26px; background: #2c2c36; }
 #topbar #btnRec, #topbar #btnMini { padding: 4px 9px; font-size: 11px; border-radius: 7px; }
 /* Nút ⚙ cài đặt — ẩn/hiện panel KẾT NỐI OSC */
@@ -222,7 +258,7 @@ button.rec.armed { background: #571c1c; border-color: var(--red); color: #ff9d9d
 main { flex: 1; display: flex; min-height: 0; }
 
 #cuePanel {
-  width: 330px; min-width: 250px;
+  width: 264px; min-width: 250px;
   background: var(--panel);
   border-right: 1px solid var(--line);
   display: flex; flex-direction: column;
@@ -307,6 +343,19 @@ button.primary:hover { background: #35497a; }
   background: #0e0e12;
 }
 
+/* Ô tìm kiếm INLINE trong hàng công cụ (Nhạc) — xổ ngay cạnh nút 🔍, không xuống hàng */
+.search-inline {
+  width: 0; opacity: 0; padding: 0; border: 1px solid transparent;
+  height: 30px; border-radius: 8px; background: #0e0e12; color: var(--text);
+  font: 12px -apple-system, system-ui, sans-serif; outline: none; flex: none;
+  transition: width .18s ease, opacity .18s ease, padding .18s ease, border-color .18s ease;
+}
+.search-inline.open { width: 118px; opacity: 1; padding: 0 9px; border-color: var(--line); }
+.search-inline.open:focus { border-color: var(--blue); }
+/* đang mở tìm kiếm: tạm ẩn nhãn + badge để ô tìm vừa 1 hàng, không tràn */
+.musictools.searching .mlabel,
+.musictools.searching .count-chip { display: none; }
+
 /* ===== Panel trái: TAB «Bài» | «Nhạc» — phương án C: cam thương hiệu HS TIMECODE ===== */
 .cue-tabs {
   display: flex; align-items: center; gap: 6px; padding: 9px 10px;
@@ -322,10 +371,12 @@ button.primary:hover { background: #35497a; }
   background: linear-gradient(135deg, #ff9f43, #ff7a1a); border-color: transparent; color: #241505;
   box-shadow: 0 4px 14px rgba(255, 138, 43, .40);
 }
+/* Lưu / Mở: nhỏ, sát trái — không chiếm phần của Bài/Nhạc */
 .cue-tabs .mini {
-  height: 42px; border-radius: 11px; border: 1px solid rgba(255, 166, 63, .25);
-  background: transparent; color: #d8b98a; font-size: 12px; padding: 0 12px;
+  flex: 0 0 auto; height: 34px; border-radius: 9px; border: 1px solid rgba(255, 166, 63, .25);
+  background: transparent; color: #d8b98a; font-size: 12px; padding: 0 11px;
 }
+.cue-tabs .spacer { display: none; }
 .cpane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .cpane[hidden] { display: none; }
 .icon-btn { padding: 6px 9px; }
@@ -394,18 +445,73 @@ button.primary:hover { background: #35497a; }
 .cue-row .cx:hover { color: var(--red); }
 .folder-empty { padding: 7px 10px; color: var(--dim); font-size: 11.5px; }
 
-/* Danh sách bài hát (tab Nhạc) — ô thả cao, hàng compact có pill định dạng */
+/* Ô thêm nhạc — bấm để chọn file, kéo thả được; dấu ＋ TO phía trước, canh giữa */
 #audioDrop {
   margin: 9px 10px 0;
-  padding: 15px 8px;
+  padding: 14px 12px;
   border: 1.5px dashed #3a3a48;
   border-radius: 10px;
   color: var(--dim);
-  font-size: 12px;
-  text-align: center;
+  font-size: 12.5px;
   background: rgba(79, 140, 255, .04);
+  display: flex; align-items: center; justify-content: center; gap: 11px;
+  cursor: pointer;
+  transition: border-color .15s, background .15s, color .15s;
 }
+#audioDrop:hover { border-color: var(--blue); background: rgba(79, 140, 255, .09); color: #b9d3ff; }
 #audioDrop.drag { border-color: var(--green); color: var(--green); background: rgba(46, 224, 111, .06); }
+#audioDrop .drop-plus {
+  flex: none; width: 38px; height: 38px; border-radius: 11px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(79, 140, 255, .18); color: #8fb8ff;
+  font-size: 25px; font-weight: 700; line-height: 1;
+}
+#audioDrop:hover .drop-plus { background: rgba(79, 140, 255, .3); color: #dbe9ff; }
+#audioDrop .drop-txt { text-align: center; color: #b9b9c5; line-height: 1.45; }
+#audioDrop .drop-txt b, #audioDrop:hover .drop-txt { color: #dbe9ff; }
+#audioDrop .drop-fmt { display: block; font-size: 10.5px; color: #5f5f6b; margin-top: 2px; }
+
+/* Cụm 3 nút phát TO + tốc độ — nằm dưới ô thêm nhạc */
+.songplay-bar {
+  display: flex; align-items: center; gap: 6px;
+  margin: 8px 10px 0; padding: 6px 7px;
+  background: #101014; border: 1px solid #26262e; border-radius: 10px;
+}
+.spbig {
+  height: 31px; border-radius: 8px; border: 1px solid #2c2c36;
+  background: #1a1a21; color: var(--txt); cursor: pointer; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: filter .15s, background .15s;
+}
+.spbig:hover { filter: brightness(1.18); }
+.spbig svg { width: 13px; height: 13px; }
+.spbig.play { width: 48px; border-color: rgba(46, 224, 111, .45); color: var(--green); background: rgba(46, 224, 111, .09); }
+.spbig.pause { width: 41px; border-color: rgba(255, 179, 107, .45); color: var(--cur); background: rgba(255, 179, 107, .08); }
+.spbig.restart { width: 41px; border-color: rgba(106, 162, 255, .4); color: #8fb8ff; background: rgba(106, 162, 255, .08); }
+.spbig:disabled { opacity: .3; cursor: default; filter: none; }
+.spspeed { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
+.spspeed select {
+  height: 31px; background: #0e0e12; border: 1px solid #2c2c36; border-radius: 8px;
+  color: var(--txt); font: 700 11.5px "SF Mono", Menlo, monospace; padding: 0 20px 0 8px;
+  appearance: none; -webkit-appearance: none; outline: none;
+  background-image: linear-gradient(45deg, transparent 50%, #6f6f7a 50%), linear-gradient(135deg, #6f6f7a 50%, transparent 50%);
+  background-position: calc(100% - 11px) 52%, calc(100% - 6px) 52%;
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+}
+.spspeed select:focus { border-color: var(--blue); }
+
+/* Thanh tiến trình bài đang nghe thử */
+.songnow {
+  margin: 8px 10px 0; padding: 7px 10px;
+  background: #101014; border: 1px solid #26262e; border-radius: 10px;
+}
+.songnow .songnow-name {
+  display: block; font-size: 11.5px; font-weight: 700; color: #e8e8ee;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.songnow .songnow-time { display: block; font: 700 10.5px "SF Mono", Menlo, monospace; color: var(--green); margin-top: 2px; }
+.songnow .songnow-bar { height: 3px; border-radius: 2px; background: #22222a; overflow: hidden; margin-top: 5px; }
+.songnow .songnow-bar i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--green), #8ffce0); }
 #songList { flex: 1; overflow-y: auto; padding: 4px 8px 10px; min-height: 60px; }
 .fmt-pill { display: inline-block; border-radius: 5px; font-size: 9.5px; font-weight: 800; letter-spacing: .5px; padding: 1px 5px; }
 .fmt-mp3 { background: rgba(154, 107, 255, .18); color: #b99aff; }
@@ -435,31 +541,20 @@ button.primary:hover { background: #35497a; }
 .song-item .sdel { border: none; background: none; color: var(--dim); cursor: pointer; font-size: 13px; padding: 2px; }
 .song-item .sdel:hover { color: var(--red); }
 
-/* ===== Cụm 3 nút phát bài hát (BÀI HÁT — nghe thử) ===== */
-.songplay {
-  display: inline-flex; align-items: center; gap: 2px;
-  background: #101014; border: 1px solid #2c2c36; border-radius: 10px; padding: 3px;
-}
-.spbtn {
-  width: 30px; height: 28px; border: none; background: transparent; color: var(--dim);
-  border-radius: 7px; font-size: 13px; cursor: pointer;
-  display: inline-flex; align-items: center; justify-content: center;
-  transition: color .15s, background .15s;
-}
-.spbtn:hover { background: #1e1e26; color: var(--txt); }
-.spbtn.play:hover, .spbtn.play.on { color: var(--green); background: rgba(46, 224, 111, .12); }
-.spbtn.pause:hover, .spbtn.pause.on { color: var(--cur); background: rgba(255, 179, 107, .12); }
-.spbtn.restart:hover { color: var(--blue); background: rgba(79, 140, 255, .12); }
-.spbtn:disabled { opacity: .3; cursor: default; background: transparent !important; color: var(--dim) !important; }
-
 /* bài đang nghe thử */
-.song-item.previewing { border-color: var(--green); box-shadow: 0 0 0 1px rgba(46, 224, 111, .3); }
-.song-item .spre { display: none; margin-left: auto; font: 700 10px "SF Mono", Menlo, monospace; color: var(--green); flex: none; }
+/* ĐANG PHÁT (nghe thử) = VIỀN VÀNG — ưu tiên hơn viền xanh "chọn" */
+.song-item.previewing {
+  border-color: var(--yellow);
+  box-shadow: 0 0 10px rgba(255, 210, 74, .22), 0 0 0 1px rgba(255, 210, 74, .35) inset;
+  background: rgba(255, 210, 74, .05);
+}
+.song-item.previewing .sname { color: #ffeeb8; }
+.song-item .spre { display: none; margin-left: auto; font: 700 10px "SF Mono", Menlo, monospace; color: var(--yellow); flex: none; }
 .song-item.previewing .spre, .song-item.active .spre { display: inline; }
-.song-item.active .spre { color: var(--dim); }
+.song-item.active:not(.previewing) .spre { color: var(--dim); }
 .song-item .sprog { display: none; height: 3px; border-radius: 2px; background: #22222a; margin-top: 6px; overflow: hidden; }
 .song-item.previewing .sprog { display: block; }
-.song-item .sprog i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--green), #8ffce0); }
+.song-item .sprog i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--yellow), #ffea9a); }
 
 /* ===== Info strip (HIỆN TẠI / TIẾP THEO / CÒN LẠI) ===== */
 #infoStrip {
